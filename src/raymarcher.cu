@@ -12,15 +12,15 @@
  */
 
 // --- GLOBAL CONSTANTS ---
-#define MAX_STEPS 1000      
-#define STEP_SIZE 0.05f     
+#define MAX_STEPS 3000      
+#define STEP_SIZE 0.08f     
 #define EVENT_HORIZON 1.0f  // rs
-#define MASS_POS make_float3(0.0f, 0.0f, 10.0f) 
+#define MASS_POS make_float3(0.0f, 0.0f, 30.0f) 
 
 // Disk physical dimensions
-#define DISK_INNER 3.5f     
-#define DISK_OUTER 8.0f
-#define DISK_HEIGHT 0.3f   // Vertical thickness of the gas cloud
+#define DISK_INNER 3.0f     
+#define DISK_OUTER 16.0f
+#define DISK_HEIGHT 0.15f   // Thinner disk for a more elegant appearance
 
 #define PI 3.1415926535f
 
@@ -88,10 +88,10 @@ __device__ float getAccretionDensity(float3 p, float innerR, float outerR, float
     float localMaxHeight = maxHeight * powf(1.0f - falloff, 1.5f);
 
     // --- 1. Base Density ---
-    float baseDensity = expf(-(p.y * p.y) / (localMaxHeight * localMaxHeight + 1e-6f));
-    baseDensity *= (1.0f - falloff) * 50.0f; 
+    float density = expf(-(p.y * p.y) / (2.0f * localMaxHeight * localMaxHeight + 1e-7f));
+    density *= (1.0f - falloff) * 8.0f; 
 
-    return fmaxf(baseDensity, 0.0f);
+    return fmaxf(density, 0.0f);
 }
 
 
@@ -256,8 +256,10 @@ __global__ void raymarch_kernel(uchar4* output, int width, int height, float tim
                 float b_emit = 0.2f * g;
 
                 // Simple integration (Step-wise solution to RTE)
-                float d_tau = density * 2.0f * STEP_SIZE; // Optical depth of this step
+                // Use current_h instead of STEP_SIZE for correct volume sampling
+                float d_tau = density * 1.5f * current_h; 
                 float step_trans = expf(-d_tau);
+
                 
                 intensity_r += r_emit * emission * (1.0f - step_trans) * transmittance;
                 intensity_g += g_emit * emission * (1.0f - step_trans) * transmittance;
