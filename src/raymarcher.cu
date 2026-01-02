@@ -29,12 +29,12 @@
 #define MASS_POS make_float3(0.0f, 0.0f, 60.0f) // [M] Black hole position
 
 // Physics & Aesthetic Tuning
-#define ISCO_RADIUS 3.0f                 // [M] Innermost stable orbit (6M for non-spinning)
+#define ISCO_RADIUS 10.0f                 // [M] Innermost stable orbit (6M for non-spinning)
 #define DISK_OUT_M 25.0f                // [M] Outer radius of disk
-#define DISK_H_M 1.5f                    // [M] Maximum disk thickness
+#define DISK_H_M 0.8f                    // [M] Maximum disk thickness
 #define DISK_LUMINOSITY 35.0f            // [Dimensionless] Emission gain factor
-#define DISK_OPACITY 1.0f                // [1/M] Absorption coefficient
-#define EXPOSURE 1.2f                    // [Dimensionless] Tone mapping exposure
+#define DISK_OPACITY 0.7f                // [1/M] Absorption coefficient
+#define EXPOSURE 0.8f                    // [Dimensionless] Tone mapping exposure
 
 // Integration Quality
 #define STEP_SIZE_M 0.3f                // [M] Integration step size in vacuum
