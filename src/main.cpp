@@ -1,3 +1,5 @@
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
 #include <glad/glad.h>
 #include <GLFW/glfw3.h>
 #include <cuda_runtime.h>
@@ -8,14 +10,14 @@
 #include "raymarcher.h"
 
 // --- SETTINGS ---
-const int WINDOW_WIDTH = 800;
-const int WINDOW_HEIGHT = 800;
+const int WINDOW_WIDTH = 2200;
+const int WINDOW_HEIGHT = 1600;
 
 // --- CAMERA CONTROLLER ---
 struct CameraController {
-    float3 pos = {0.0f, 1.2f, 0.0f}; // Camera starting position
-    float yaw = 0.0f;               // Horizontal rotation
-    float pitch = 0.0f;             // Vertical rotation
+    float3 pos = {0.0f, 1.2f, 0.0f}; 
+    float yaw = 0.0f;               
+    float pitch = 0.0f;             
     float lastX = WINDOW_WIDTH / 2.0f;
     float lastY = WINDOW_HEIGHT / 2.0f;
     bool firstMouse = true;
@@ -26,17 +28,14 @@ struct CameraController {
         float radYaw = yaw * 3.14159f / 180.0f;
         float radPitch = pitch * 3.14159f / 180.0f;
 
-        // Calculate Forward vector
         float3 forward;
         forward.x = std::sin(radYaw) * std::cos(radPitch);
         forward.y = std::sin(radPitch);
         forward.z = std::cos(radYaw) * std::cos(radPitch);
         
-        // Normalize forward
         float mag = std::sqrt(forward.x*forward.x + forward.y*forward.y + forward.z*forward.z);
         forward.x /= mag; forward.y /= mag; forward.z /= mag;
 
-        // Calculate Right vector (Cross of World Up and Forward)
         float3 worldUp = {0.0f, 1.0f, 0.0f};
         float3 right;
         right.x = worldUp.y * forward.z - worldUp.z * forward.y;
@@ -45,12 +44,10 @@ struct CameraController {
         float rMag = std::sqrt(right.x*right.x + right.y*right.y + right.z*right.z);
         right.x /= rMag; right.y /= rMag; right.z /= rMag;
 
-        // Calculate Up vector (Cross of Forward and Right)
         float3 up;
         up.x = forward.y * right.z - forward.z * right.y;
         up.y = forward.z * right.x - forward.x * right.z;
         up.z = forward.x * right.y - forward.y * right.x;
-
 
         return {pos, forward, right, up};
     }
@@ -63,41 +60,70 @@ struct AppState {
     GLuint vao = 0, vbo = 0, ebo = 0;
     GLuint shaderProgram = 0;
     cudaGraphicsResource_t cudaResource = nullptr;
+    
+    // Skybox Texture
+    cudaArray* skyboxArray = nullptr;
+    cudaTextureObject_t skyboxTexObj = 0;
 } g_State;
+
+// --- SKYBOX LOADING ---
+
+void loadSkybox(const char* filename) {
+    int width, height, channels;
+    // Load as float for high-quality mapping later, though PNG is 8-bit
+    unsigned char* data = stbi_load(filename, &width, &height, &channels, 4);
+    if (!data) {
+        std::cerr << "Failed to load skybox: " << filename << std::endl;
+        return;
+    }
+
+    cudaChannelFormatDesc channelDesc = cudaCreateChannelDesc(8, 8, 8, 8, cudaChannelFormatKindUnsigned);
+    cudaMallocArray(&g_State.skyboxArray, &channelDesc, width, height);
+    cudaMemcpy2DToArray(g_State.skyboxArray, 0, 0, data, width * 4, width * 4, height, cudaMemcpyHostToDevice);
+
+    cudaResourceDesc resDesc;
+    memset(&resDesc, 0, sizeof(resDesc));
+    resDesc.resType = cudaResourceTypeArray;
+    resDesc.res.array.array = g_State.skyboxArray;
+
+    cudaTextureDesc texDesc;
+    memset(&texDesc, 0, sizeof(texDesc));
+    texDesc.addressMode[0] = cudaAddressModeWrap;
+    texDesc.addressMode[1] = cudaAddressModeClamp;
+    texDesc.filterMode = cudaFilterModeLinear;
+    texDesc.readMode = cudaReadModeNormalizedFloat; // Map 0-255 to 0.0-1.0
+    texDesc.normalizedCoords = 1;
+
+    cudaCreateTextureObject(&g_State.skyboxTexObj, &resDesc, &texDesc, NULL);
+    stbi_image_free(data);
+    std::cout << "Skybox loaded: " << width << "x" << height << std::endl;
+}
 
 // --- CALLBACKS ---
 
 void mouse_callback(GLFWwindow* window, double xposIn, double yposIn) {
     float xpos = static_cast<float>(xposIn);
     float ypos = static_cast<float>(yposIn);
-
     if (g_Camera.firstMouse) {
         g_Camera.lastX = xpos;
         g_Camera.lastY = ypos;
         g_Camera.firstMouse = false;
     }
-
     float xoffset = g_Camera.lastX - xpos;
     float yoffset = g_Camera.lastY - ypos;
-
     g_Camera.lastX = xpos;
     g_Camera.lastY = ypos;
 
-
     xoffset *= g_Camera.mouseSensitivity;
     yoffset *= g_Camera.mouseSensitivity;
-
     g_Camera.yaw   -= xoffset;
     g_Camera.pitch -= yoffset;
-
-    // Constrain pitch to avoid flipping
     if (g_Camera.pitch > 89.0f)  g_Camera.pitch = 89.0f;
     if (g_Camera.pitch < -89.0f) g_Camera.pitch = -89.0f;
 }
 
 void processInput(GLFWwindow* window) {
     CameraState cs = g_Camera.getCUDAState();
-    
     if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS) {
         g_Camera.pos.x += cs.forward.x * g_Camera.moveSpeed;
         g_Camera.pos.y += cs.forward.y * g_Camera.moveSpeed;
@@ -214,7 +240,7 @@ void renderFrame() {
     cudaGraphicsMapResources(1, &g_State.cudaResource, 0);
     cudaGraphicsResourceGetMappedPointer((void**)&d_out, &size, g_State.cudaResource);
 
-    launch_raymarch(d_out, WINDOW_WIDTH, WINDOW_HEIGHT, time, g_Camera.getCUDAState());
+    launch_raymarch(d_out, WINDOW_WIDTH, WINDOW_HEIGHT, time, g_Camera.getCUDAState(), g_State.skyboxTexObj);
 
     cudaGraphicsUnmapResources(1, &g_State.cudaResource, 0);
 
@@ -238,14 +264,13 @@ int main() {
     GLFWwindow* window = glfwCreateWindow(WINDOW_WIDTH, WINDOW_HEIGHT, "Relativistic Ray Tracer", NULL, NULL);
     if (!window) return -1;
     glfwMakeContextCurrent(window);
-    
-    // Mouse Capture
     glfwSetCursorPosCallback(window, mouse_callback);
     glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
-
     if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress)) return -1;
 
     initGLResources();
+    loadSkybox("assets/skyboxes/skybox2.jpg");
+
 
     while (!glfwWindowShouldClose(window)) {
         processInput(window);
@@ -256,6 +281,9 @@ int main() {
             glfwSetWindowShouldClose(window, true);
     }
 
+    if (g_State.skyboxTexObj) cudaDestroyTextureObject(g_State.skyboxTexObj);
+    if (g_State.skyboxArray) cudaFreeArray(g_State.skyboxArray);
+    
     glfwTerminate();
     return 0;
 }

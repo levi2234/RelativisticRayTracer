@@ -1,11 +1,11 @@
 #ifndef RAYMARCHER_H
 #define RAYMARCHER_H
 
-#include <vector_types.h> // For uchar4, float3
+#include <vector_types.h>
+#include <texture_types.h>
 
 /**
  * Camera state to be passed from C++ (Host) to CUDA (Device).
- * Defines the camera position and its orthonormal basis vectors.
  */
 struct CameraState {
     float3 pos;
@@ -15,6 +15,7 @@ struct CameraState {
 };
 
 // Wrapper function to launch the CUDA kernel
-void launch_raymarch(uchar4* d_out, int w, int h, float time, CameraState cam);
+// Added skyboxTex parameter for the texture skybox
+void launch_raymarch(uchar4* d_out, int w, int h, float time, CameraState cam, cudaTextureObject_t skyboxTex);
 
 #endif
