@@ -11,11 +11,23 @@
  * while accounting for Doppler boosting and Gravitational redshift.
  */
 
-// --- GLOBAL CONSTANTS ---
+// --- SIMULATION PARAMETERS ---
 #define MAX_STEPS 3000      
 #define STEP_SIZE 0.08f     
-#define EVENT_HORIZON 1.0f  // rs
+#define EVENT_HORIZON 1.0f  // Unit = rs
 #define MASS_POS make_float3(0.0f, 0.0f, 30.0f) 
+
+// Physics & Aesthetic Tuning
+#define DISK_DENSITY 8.0f     
+#define LENSING_STRENGTH 1.5f 
+#define BEAMING_STRENGTH 4.0f 
+#define ABSORPTION_COEFF 1.5f 
+#define EXPOSURE 1.2f         
+
+// Color Palette
+#define DISK_COLOR_R 1.35f
+#define DISK_COLOR_G 0.65f
+#define DISK_COLOR_B 0.25f
 
 // Disk physical dimensions
 #define DISK_INNER 3.0f     
@@ -89,7 +101,7 @@ __device__ float getAccretionDensity(float3 p, float innerR, float outerR, float
 
     // --- 1. Base Density ---
     float density = expf(-(p.y * p.y) / (2.0f * localMaxHeight * localMaxHeight + 1e-7f));
-    density *= (1.0f - falloff) * 8.0f; 
+    density *= (1.0f - falloff) * DISK_DENSITY; 
 
     return fmaxf(density, 0.0f);
 }
@@ -133,7 +145,7 @@ __device__ float3 getGeodesicAcc(float3 p_rel, float3 v) {
     
     float3 L_vec = cross(p_rel, v);
     float L2 = dot(L_vec, L_vec);
-    float acc_mag = -1.5f * EVENT_HORIZON * L2 / (r2 * r2 * r);
+    float acc_mag = -LENSING_STRENGTH * EVENT_HORIZON * L2 / (r2 * r2 * r);
     return mul(p_rel, acc_mag);
 }
 
@@ -246,19 +258,19 @@ __global__ void raymarch_kernel(uchar4* output, int width, int height, float tim
                 // Calculate local g-factor (redshift)
                 float g = calculateRedshiftFactor(rel_p, vel);
                 
-                // Emission: I_obs = g^4 * I_emit
-                // Model gas as a blackbody (red-orange)
-                float emission = powf(g, 4.0f) * density;
+                // Emission: I_obs = g^pow * I_emit
+                float emission = powf(g, BEAMING_STRENGTH) * density;
                 
-                // Colors based on heat (vaguely blackbody)
-                float r_emit = 1.3f;
-                float g_emit = 0.6f + 0.4f * (g - 0.5f); // Shifted by Doppler
-                float b_emit = 0.2f * g;
+                // Colors based on heat
+                float r_emit = DISK_COLOR_R;
+                float g_emit = DISK_COLOR_G + 0.4f * (g - 0.5f);
+                float b_emit = DISK_COLOR_B * g;
+
 
                 // Simple integration (Step-wise solution to RTE)
-                // Use current_h instead of STEP_SIZE for correct volume sampling
-                float d_tau = density * 1.5f * current_h; 
+                float d_tau = density * ABSORPTION_COEFF * current_h; 
                 float step_trans = expf(-d_tau);
+
 
                 
                 intensity_r += r_emit * emission * (1.0f - step_trans) * transmittance;
@@ -296,10 +308,11 @@ __global__ void raymarch_kernel(uchar4* output, int width, int height, float tim
         float out_g = intensity_g + skyColor.y * transmittance;
         float out_b = intensity_b + skyColor.z * transmittance;
         
-        // Simple tone mapping (prevent over-saturation)
-        out_r = 1.0f - expf(-out_r);
-        out_g = 1.0f - expf(-out_g);
-        out_b = 1.0f - expf(-out_b);
+        // Tone mapping (prevent over-saturation)
+        out_r = 1.0f - expf(-out_r * EXPOSURE);
+        out_g = 1.0f - expf(-out_g * EXPOSURE);
+        out_b = 1.0f - expf(-out_b * EXPOSURE);
+
 
         final_color = make_uchar4((unsigned char)(out_r * 255), (unsigned char)(out_g * 255), (unsigned char)(out_b * 255), 255);
     }
