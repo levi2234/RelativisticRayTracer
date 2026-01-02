@@ -4,35 +4,42 @@
 #include <math.h>
 
 /**
- * --- RELATIVISTIC RADIATIVE TRANSFER ENGINE ---
+ * --- RELATIVISTIC RADIATIVE TRANSFER ENGINE (PHYSICS TOOL VERSION) ---
  * 
- * This engine simulates light passing THROUGH a gas accretion disk.
- * Instead of a solid surface, we accumulate emission and absorption
- * while accounting for Doppler boosting and Gravitational redshift.
+ * Target: Sagittarius A* (Supermassive Black Hole)
+ * Units: Geometric (G=c=1), scaled to Mass M. 
+ * Rs (Schwarzschild radius) = 2.0M.
  */
 
-// --- SIMULATION PARAMETERS ---
-#define MAX_STEPS 3000      
-#define STEP_SIZE 0.08f     
-#define EVENT_HORIZON 1.0f  // Unit = rs
-#define MASS_POS make_float3(0.0f, 0.0f, 30.0f) 
+// --- PHYSICAL CONSTANTS (SI Units) ---
+#define C_LIGHT 299792458.0f             // [m/s] Speed of light
+#define G_CONSTANT 6.67430e-11f          // [m^3 kg^-1 s^-2] Gravitational constant
+#define SOLAR_MASS 1.98847e30f           // [kg] Mass of the Sun
+
+// --- TARGET OBJECT: SAGITTARIUS A* ---
+#define BH_MASS_SOLAR 4.154e6f           // [M_sun] Mass in solar masses
+#define DISK_TEMP_REF 1.5e7f             // [K] Reference temperature of gas
+
+// --- SIMULATION SCALING (Geometric Units G=c=1) ---
+// Mass in meters: M = G*Mass/c^2
+#define M_UNIT (G_CONSTANT * (BH_MASS_SOLAR * SOLAR_MASS) / (C_LIGHT * C_LIGHT)) // [m]
+
+// Simulation Units: 1.0 = M (The mass of the BH)
+#define EVENT_HORIZON 2.0f               // [M] Schwarzschild radius Rs = 2M
+#define MASS_POS make_float3(0.0f, 0.0f, 60.0f) // [M] Black hole position
 
 // Physics & Aesthetic Tuning
-#define DISK_DENSITY 8.0f     
-#define LENSING_STRENGTH 1.5f 
-#define BEAMING_STRENGTH 4.0f 
-#define ABSORPTION_COEFF 1.5f 
-#define EXPOSURE 1.2f         
+#define ISCO_RADIUS 3.0f                 // [M] Innermost stable orbit (6M for non-spinning)
+#define DISK_OUT_M 25.0f                // [M] Outer radius of disk
+#define DISK_H_M 1.5f                    // [M] Maximum disk thickness
+#define DISK_LUMINOSITY 35.0f            // [Dimensionless] Emission gain factor
+#define DISK_OPACITY 1.0f                // [1/M] Absorption coefficient
+#define EXPOSURE 1.2f                    // [Dimensionless] Tone mapping exposure
 
-// Color Palette
-#define DISK_COLOR_R 1.35f
-#define DISK_COLOR_G 0.65f
-#define DISK_COLOR_B 0.25f
+// Integration Quality
+#define STEP_SIZE_M 0.3f                // [M] Integration step size in vacuum
+#define MAX_STEPS 2000                   // [Steps] Max ray steps
 
-// Disk physical dimensions
-#define DISK_INNER 3.0f     
-#define DISK_OUTER 16.0f
-#define DISK_HEIGHT 0.15f   // Thinner disk for a more elegant appearance
 
 #define PI 3.1415926535f
 
@@ -67,44 +74,44 @@ __device__ float3 add(float3 a, float3 b) {
 __device__ float3 mul(float3 v, float s) {
     return make_float3(v.x * s, v.y * s, v.z * s);
 }
-\
-
 
 // --- PHYSICS FUNCTIONS ---
 
 /**
- * Calculates the local gas density at position p.
- * Model: Torus with radial and vertical Gaussian falloff.
+ * Temperature profile (Shakura-Sunyaev)
+ * T(r) = T_ref * (r/ISCO)^-0.75
  */
-__device__ float getDiskDensity(float3 p_rel) {
-    float r = sqrtf(p_rel.x*p_rel.x + p_rel.z*p_rel.z);
-    
-    // Radial bounds check
-    if (r < DISK_INNER || r > DISK_OUTER) return 0.0f;
-    
-    // Radial density profile (peak in the middle)
-    float radial_factor = expf(-powf((r - 4.5f) / 1.5f, 2.0f));
-    
-    // Vertical falloff (disk thickness)
-    float vertical_factor = expf(-powf(p_rel.y / DISK_HEIGHT, 2.0f));
-    
-    return radial_factor * vertical_factor;
+__device__ float getDiskTemperature(float r) {
+    if (r < ISCO_RADIUS) return 0.0f;
+    return DISK_TEMP_REF * powf(r / ISCO_RADIUS, -0.75f);
 }
 
-__device__ float getAccretionDensity(float3 p, float innerR, float outerR, float maxHeight) {
-    float r = length(make_float3(p.x, 0, p.z));
+/**
+ * Calculates local gas density with vertical tapering.
+ */
+__device__ float getAccretionDensity(float3 p) {
+    float r = length(make_float3(p.x, 0.0f, p.z));
+    if (r < ISCO_RADIUS || r > DISK_OUT_M) return 0.0f;
+
+    // Smooth edge falloff (Tapering)
+    float edge_falloff = 1.0f;
+    float edge_start = DISK_OUT_M * 0.8f;
+    if (r > edge_start) {
+        edge_falloff = 1.0f - (r - edge_start) / (DISK_OUT_M - edge_start);
+        edge_falloff = edge_falloff * edge_falloff; // Quadratic taper
+    }
+
+    // Tapered thickness: disk gets thinner as it moves out
+    float local_h = DISK_H_M * powf(ISCO_RADIUS / r, 0.5f);
+
+    // Gaussian vertical profile
+    float density = expf(-(p.y * p.y) / (2.0f * local_h * local_h + 1e-7f));
     
-    if (r < innerR || r > outerR) return 0.0f;
-
-    float falloff = (r - innerR) / (outerR - innerR);
-    float localMaxHeight = maxHeight * powf(1.0f - falloff, 1.5f);
-
-    // --- 1. Base Density ---
-    float density = expf(-(p.y * p.y) / (2.0f * localMaxHeight * localMaxHeight + 1e-7f));
-    density *= (1.0f - falloff) * DISK_DENSITY; 
-
-    return fmaxf(density, 0.0f);
+    // Radial density falloff
+    return density * powf(ISCO_RADIUS / r, 0.35f) * edge_falloff;
 }
+
+
 
 
 /**
@@ -143,12 +150,13 @@ __device__ float3 getGeodesicAcc(float3 p_rel, float3 v) {
     float r = sqrtf(r2);
     if (r < EVENT_HORIZON * 0.5f) return make_float3(0,0,0);
     
+    // Schwarzschild Acceleration in units of M:
+    // a = -1.5 * Rs * L^2 / r^5  (where Rs = 2M)
     float3 L_vec = cross(p_rel, v);
     float L2 = dot(L_vec, L_vec);
-    float acc_mag = -LENSING_STRENGTH * EVENT_HORIZON * L2 / (r2 * r2 * r);
+    float acc_mag = -1.5f * EVENT_HORIZON * L2 / (r2 * r2 * r);
     return mul(p_rel, acc_mag);
 }
-
 
 // ----- INTEGRATORS -----
 
@@ -162,7 +170,6 @@ __device__ void integrate_euler(float3 &p, float3 &v, float h) {
     p = add(p, mul(v, h));
     v = add(v, mul(acc, h));
 }
-
 
 /**
  * Runge-Kutta 4 (4th Order)
@@ -205,8 +212,6 @@ __device__ void integrate_rk4(float3 &p, float3 &v, float h) {
     p = add(p, mul(kp_sum, h / 6.0f));
 }
 
-
-
 // --- RENDER KERNEL ---
 
 __global__ void raymarch_kernel(uchar4* output, int width, int height, float time, CameraState cam, cudaTextureObject_t skyboxTex) {
@@ -241,72 +246,75 @@ __global__ void raymarch_kernel(uchar4* output, int width, int height, float tim
         }
 
         // --- GEODESIC STEP ---
-        // Adaptive check: slows down inside the disk zone
-        float current_h = STEP_SIZE;
-        bool in_disk_zone = (fabsf(rel_p.y) < DISK_HEIGHT * 2.5f && r > DISK_INNER - 1.0f && r < DISK_OUTER + 1.0f);
-        if (in_disk_zone) current_h *= 0.4f;
+        float current_h = STEP_SIZE_M;
+        // High quality sampling near horizon and in the gas disk zone
+        bool near_bh = (r < 18.0f);
+        bool in_disk_zone = (fabsf(rel_p.y) < DISK_H_M * 4.0f && r < DISK_OUT_M + 10.0f);
+        
+        if (near_bh) current_h *= 0.1f; 
+        else if (in_disk_zone) current_h *= 0.3f;
 
         integrate_rk4(p, vel, current_h);
 
 
-        // --- RADIATIVE TRANSFER (GAS DISK) ---
-        // Quick AABB-style check to optimize out gas calculations
-        if (fabsf(rel_p.y) < DISK_HEIGHT * 3.0f && r > DISK_INNER && r < DISK_OUTER) {
-            float density = getAccretionDensity(rel_p, DISK_INNER, DISK_OUTER, DISK_HEIGHT);
-            
-            if (density > 0.01f) {
-                // Calculate local g-factor (redshift)
+
+
+        // --- RADIATIVE TRANSFER ---
+        if (in_disk_zone) {
+            float density = getAccretionDensity(rel_p);
+            if (density > 0.001f) {
                 float g = calculateRedshiftFactor(rel_p, vel);
+                float T = getDiskTemperature(r);
                 
-                // Emission: I_obs = g^pow * I_emit
-                float emission = powf(g, BEAMING_STRENGTH) * density;
+                // Relativistic Invariant: I_obs = g^4 * [Bolometric Intensity]
+                // Power 0.5 for T creates a very slow visual falloff
+                float T_norm = powf(T / DISK_TEMP_REF, 0.5f);
+                float bol_I = powf(g, 4.0f) * T_norm * density * DISK_LUMINOSITY;
                 
-                // Colors based on heat
-                float r_emit = DISK_COLOR_R;
-                float g_emit = DISK_COLOR_G + 0.4f * (g - 0.5f);
-                float b_emit = DISK_COLOR_B * g;
+                // Color mapping: Shifted towards orange-red spectrum
+                float color_t = g * powf(T / DISK_TEMP_REF, 0.4f) * 2.5f;
+                float r_emit = 1.0f;
+                float g_emit = fminf(0.55f, 0.3f * color_t);        // Lowered green for orange
+                float b_emit = fmaxf(0.0f, 0.05f * (color_t - 1.2f)); // Very low blue
 
-
-                // Simple integration (Step-wise solution to RTE)
-                float d_tau = density * ABSORPTION_COEFF * current_h; 
+                // Physical absorption (Beer-Lambert Law) using new DISK_OPACITY
+                float d_tau = density * DISK_OPACITY * current_h; 
                 float step_trans = expf(-d_tau);
 
-
-                
-                intensity_r += r_emit * emission * (1.0f - step_trans) * transmittance;
-                intensity_g += g_emit * emission * (1.0f - step_trans) * transmittance;
-                intensity_b += b_emit * emission * (1.0f - step_trans) * transmittance;
+                intensity_r += r_emit * bol_I * (1.0f - step_trans) * transmittance;
+                intensity_g += g_emit * bol_I * (1.0f - step_trans) * transmittance;
+                intensity_b += b_emit * bol_I * (1.0f - step_trans) * transmittance;
                 
                 transmittance *= step_trans;
-                
-                // Early exit if the disk is fully opaque
                 if (transmittance < 0.01f) break;
             }
         }
 
         // 3. Escape to infinity
-        if (r > 64.0f && dot(rel_p, vel) > 0) break;
+        if (r > 250.0f && dot(rel_p, vel) > 0) break;
+
     }
 
     // --- FINAL COLOR ASSEMBLY ---
     uchar4 final_color;
     
-    if (hit_horizon) {
-        final_color = make_uchar4(0, 0, 0, 255);
-    } else {
-        // Sample Skybox and combine with disk intensity
+    // Background light (Skybox or Black Hole)
+    float3 bg_color = make_float3(0,0,0);
+    if (!hit_horizon) {
         float3 d = normalize(vel);
         float phi = atan2f(d.z, d.x);
         float theta = asinf(d.y);
         float tx = 0.5f + phi / (2.0f * PI);
         float ty = 0.5f - theta / PI;
-        
         float4 skyColor = tex2D<float4>(skyboxTex, tx, ty);
-        
-        // Final pixel colors
-        float out_r = intensity_r + skyColor.x * transmittance;
-        float out_g = intensity_g + skyColor.y * transmittance;
-        float out_b = intensity_b + skyColor.z * transmittance;
+        bg_color = make_float3(skyColor.x, skyColor.y, skyColor.z);
+    }
+
+    // Final pixel colors
+    float out_r = intensity_r + bg_color.x * transmittance;
+    float out_g = intensity_g + bg_color.y * transmittance;
+    float out_b = intensity_b + bg_color.z * transmittance;
+
         
         // Tone mapping (prevent over-saturation)
         out_r = 1.0f - expf(-out_r * EXPOSURE);
@@ -315,7 +323,7 @@ __global__ void raymarch_kernel(uchar4* output, int width, int height, float tim
 
 
         final_color = make_uchar4((unsigned char)(out_r * 255), (unsigned char)(out_g * 255), (unsigned char)(out_b * 255), 255);
-    }
+
 
     output[(height - 1 - y) * width + x] = final_color;
 }
