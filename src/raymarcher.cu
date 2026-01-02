@@ -4,149 +4,167 @@
 #include <math.h>
 
 /**
- * --- RAYMARCHING CORE ---
+ * --- RELATIVISTIC ACCRETION DISK INTEGRATOR ---
  * 
- * This file contains the GPU kernels that perform the actual raymarching logic.
- * Raymarching (specifically Sphere Tracing) works by "stepping" along a ray
- * by the distance to the nearest object in the scene.
+ * This kernel simulates light paths near a Schwarzschild black hole.
+ * Instead of simple spheres, we now render a "Thin Accretion Disk" 
+ * to visualize the extreme gravitational lensing (the "Interstellar" look).
  */
 
 // --- CONSTANTS ---
-#define MAX_STEPS 100      // Maximum number of steps per ray
-#define SURF_DIST 0.001f   // Distance considered a "hit" on a surface
-#define MAX_DIST 100.0f    // Distance at which we give up (sky)
+#define MAX_STEPS 1000      // More steps for higher precision in the curves
+#define STEP_SIZE 0.04f     // Smaller steps for better accuracy
+#define EVENT_HORIZON 1.0f  // Schwarzschild radius (rs)
+#define MASS_POS make_float3(0.0f, 0.0f, 10.0f) 
+
+// Disk dimensions (multiples of rs)
+#define DISK_INNER 2.2f     
+#define DISK_OUTER 7.0f
 
 // --- MATH HELPERS ---
 
-// Calculates the magnitude of a 3D vector
+__device__ float dot(float3 a, float3 b) {
+    return a.x*b.x + a.y*b.y + a.z*b.z;
+}
+
+__device__ float3 cross(float3 a, float3 b) {
+    return make_float3(
+        a.y*b.z - a.z*b.y,
+        a.z*b.x - a.x*b.z,
+        a.x*b.y - a.y*b.x
+    );
+}
+
 __device__ float length(float3 v) {
     return sqrtf(v.x*v.x + v.y*v.y + v.z*v.z);
 }
 
-// Returns a unit-length version of the input vector
 __device__ float3 normalize(float3 v) {
     float mag = length(v);
     return make_float3(v.x / mag, v.y / mag, v.z / mag);
 }
 
-// Vector subtraction: a - b
 __device__ float3 sub(float3 a, float3 b) {
     return make_float3(a.x - b.x, a.y - b.y, a.z - b.z);
 }
 
-// --- SDF (Signed Distance Function) primitives ---
-// These return the distance from point 'p' to the surface of the shape.
-// Positive = outside, Negative = inside, Zero = on surface.
-
-// Distance to a sphere of radius 's' centered at origin
-__device__ float sdSphere(float3 p, float s) {
-    return length(p) - s;
+__device__ float3 add(float3 a, float3 b) {
+    return make_float3(a.x + b.x, a.y + b.y, a.z + b.z);
 }
 
-// Distance to a box of size 'b' centered at origin
-__device__ float sdBox(float3 p, float3 b) {
-    float3 q = make_float3(fabsf(p.x) - b.x, fabsf(p.y) - b.y, fabsf(p.z) - b.z);
-    float outside = length(make_float3(fmaxf(q.x, 0.0f), fmaxf(q.y, 0.0f), fmaxf(q.z, 0.0f)));
-    float inside = fminf(fmaxf(q.x, fmaxf(q.y, q.z)), 0.0f);
-    return outside + inside;
-}
-
-// --- SCENE DEFINITION ---
-// This function combines all objects into a single mathematical field.
-__device__ float sceneSDF(float3 p, float time) {
-    // 1. Moving Sphere: Animated position using sine/cosine
-    float3 spherePos = make_float3(sinf(time) * 1.5f, cosf(time * 0.5f) * 0.5f, 5.0f);
-    float sphere = sdSphere(sub(p, spherePos), 1.0f);
-    
-    // 2. Stationary Box: Fixed at center-bottom
-    float3 boxPos = make_float3(0.0f, -1.5f, 5.0f);
-    float box = sdBox(sub(p, boxPos), make_float3(0.7f, 0.7f, 0.7f));
-    
-    // 3. Boolean Union: fmin returns the distance to the closest object
-    return fminf(sphere, box);
+__device__ float3 mul(float3 v, float s) {
+    return make_float3(v.x * s, v.y * s, v.z * s);
 }
 
 // --- RENDER KERNEL ---
-// This runs once for every single pixel on the screen.
+
 __global__ void raymarch_kernel(uchar4* output, int width, int height, float time) {
-    // Determine which pixel this thread is responsible for
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
-    
-    // Bounds check
     if (x >= width || y >= height) return;
 
-    // Normalize coordinates: Convert pixel (0..width) to (-1..1) range
+    // Viewport [-1, 1] with aspect correction
     float u = (float)x / width * 2.0f - 1.0f;
     float v = (float)y / height * 2.0f - 1.0f;
-    
-    // Primary aspect ratio correction
     float aspect = (float)width / height;
     u *= aspect;
 
-    // Ray Setup: Camera is at (0,0,0) looking forward along Z axis
-    float3 ro = make_float3(0.0f, 0.0f, 0.0f);           // Ray Origin
-    float3 rd = normalize(make_float3(u, v, 1.0f));     // Ray Direction
+    // Camera setup: tilting slightly to see the disk better
+    float3 ro = make_float3(0.0f, 1.5f, 0.0f);           
+    float3 rd = normalize(make_float3(u, v - 0.15f, 1.0f)); 
+    
+    float3 p = ro;
+    float3 vel = rd;
 
-    // Raymarching Loop: "Sphere Tracing"
-    float dO = 0.0f; // Total distance traveled
-    bool hit = false;
+    bool hit_horizon = false;
+    bool hit_disk = false;
+    float disk_r = 0.0f; // Stores radius from center when hitting disk
+
+    // Geodesic Integration Loop
     for(int i = 0; i < MAX_STEPS; i++) {
+        float3 rel_p = sub(p, MASS_POS);
+        float r2 = dot(rel_p, rel_p);
+        float r = sqrtf(r2);
 
-
-
-        // Integrate the ray
-        float3 p = make_float3(ro.x + rd.x * dO, ro.y + rd.y * dO, ro.z + rd.z * dO);
-        
-        // Get distance to nearest object in the scene
-        float dS = sceneSDF(p, time); 
-        
-        dO += dS; // Integrate the ray
-        
-        // Check for intersection or "sky" limit
-        if(dS < SURF_DIST || dO > MAX_DIST) {
-            if(dS < SURF_DIST) hit = true;
+        // 1. Event Horizon Check
+        if (r < EVENT_HORIZON * 1.01f) {
+            hit_horizon = true;
             break;
         }
+
+        // 2. Accretion Disk Check (Thin plane at Y=0 relative to MASS_POS)
+        // Check if ray crossed the Y=0 plane between this step and previous
+        float prev_y = rel_p.y;
+        
+        // Relativistic Deflection Force
+        float3 L_vec = cross(rel_p, vel);
+        float L2 = dot(L_vec, L_vec);
+        float acc_mag = -1.5f * EVENT_HORIZON * L2 / (r2 * r2 * r);
+        float3 acc = mul(rel_p, acc_mag);
+
+        // Step
+        vel = add(vel, mul(acc, STEP_SIZE));
+        p = add(p, mul(vel, STEP_SIZE));
+        
+        float3 next_rel_p = sub(p, MASS_POS);
+        
+        // If we crossed the plane (y sign change)
+        if ((prev_y > 0 && next_rel_p.y < 0) || (prev_y < 0 && next_rel_p.y > 0)) {
+            // Roughly estimate the intersection radius
+            float t = fabsf(prev_y) / (fabsf(prev_y) + fabsf(next_rel_p.y));
+            float3 intersect = add(rel_p, mul(sub(next_rel_p, rel_p), t));
+            float ir2 = dot(intersect, intersect);
+            float ir = sqrtf(ir2);
+            
+            if (ir > DISK_INNER && ir < DISK_OUTER) {
+                hit_disk = true;
+                disk_r = ir;
+                break;
+            }
+        }
+
+        // 3. Escape check
+        if (r > 60.0f && dot(rel_p, vel) > 0) break;
     }
 
-    // Shading: Determine the pixel color based on whether we hit anything
-    unsigned char r, g, b;
-    if(hit) {
-        // Simple distance-based lighting (darker as it gets further away)
-        float brightness = 1.0f / (1.0f + dO * 0.1f);
-        r = (unsigned char)(brightness * 180 + 30);
-        g = (unsigned char)(brightness * 120 + 20);
-        b = (unsigned char)(brightness * 230 + 25);
+    // --- SHADING ---
+    unsigned char r_col, g_col, b_col;
+    
+    if (hit_horizon) {
+        r_col = 0; g_col = 0; b_col = 0;
+    } else if (hit_disk) {
+        // Glowing hot disk shading
+        // Hotter (brighter/whiter) near the center, redder/dimmer further out
+        float norm_r = (disk_r - DISK_INNER) / (DISK_OUTER - DISK_INNER);
+        float heat = powf(1.0f - norm_r, 2.0f);
+        
+        r_col = (unsigned char)(255);
+        g_col = (unsigned char)(heat * 200 + 50);
+        b_col = (unsigned char)(heat * heat * 150);
+        
+        // Add some "texture" to the disk based on angle (very simple)
+        float3 rel_p = sub(p, MASS_POS);
+        float angle = atan2f(rel_p.z, rel_p.x);
+        float noise = 0.8f + 0.2f * sinf(angle * 20.0f + norm_r * 50.0f);
+        r_col = (unsigned char)(r_col * noise);
+        g_col = (unsigned char)(g_col * noise);
+        b_col = (unsigned char)(b_col * noise);
+        
     } else {
-        // Procedural Sky Backdrop
-        float bg = 0.5f * (v + 1.0f); // Gradient base
-        r = (unsigned char)(10 + bg * 20);
-        g = (unsigned char)(10 + bg * 20);
-        b = (unsigned char)(30 + bg * 50);
+        // Starfield
+        float3 dir = normalize(vel);
+        float stars = powf(fmaxf(0.0f, sinf(dir.x * 60.0f) * sinf(dir.y * 60.0f) * sinf(dir.z * 60.0f)), 25.0f);
+        unsigned char s = stars > 0.4f ? 255 : 0;
+        
+        r_col = s; g_col = s; b_col = s + 30;
     }
 
-    // Write to Output: 
-    // We flip Y because OpenGL's texture coordinate (0,0) is bottom-left,
-    // but our kernel's y index typically starts from the top.
-    output[(height - 1 - y) * width + x] = make_uchar4(r, g, b, 255);
+    output[(height - 1 - y) * width + x] = make_uchar4(r_col, g_col, b_col, 255);
 }
 
-// --- HOST WRAPPER ---
-// This part runs on the CPU and launches the GPU kernel.
 void launch_raymarch(uchar4* d_out, int w, int h, float time) {
-    // Define thread block size (16x16 = 256 threads)
     dim3 block(16, 16);
-    
-    // Calculate grid size to cover the entire window
     dim3 grid((w + block.x - 1) / block.x, (h + block.y - 1) / block.y);
 
-    // Launch the kernel on the GPU
     raymarch_kernel<<<grid, block>>>(d_out, w, h, time);
-    
-    // Post-launch error check
-    cudaError_t err = cudaGetLastError();
-    if (err != cudaSuccess) {
-        // Diagnostic printing could be added here if needed
-    }
 }

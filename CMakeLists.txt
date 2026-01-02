@@ -1,11 +1,9 @@
 cmake_minimum_required(VERSION 3.18)
 project(RelativisticRayTracer VERSION 0.1.0 LANGUAGES CXX CUDA)
 
-/**
- * --- BUILD CONFIGURATION ---
- * This project uses CMake to orchestrate a hybrid C++/CUDA build.
- * It requires the NVIDIA CUDA Toolkit and a C++ compiler (MSVC on Windows).
- */
+# --- BUILD CONFIGURATION ---
+# This project uses CMake to orchestrate a hybrid C++/CUDA build.
+# It requires the NVIDIA CUDA Toolkit and a C++ compiler (MSVC on Windows).
 
 # Standard C++ and CUDA versions (Match for compatibility)
 set(CMAKE_CXX_STANDARD 17)
