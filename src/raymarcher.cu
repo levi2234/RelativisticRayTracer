@@ -41,10 +41,10 @@
 #define EXPOSURE 0.8f                    // [Dimensionless] Tone mapping exposure
 
 // --- DUST CLOUD LAYER PARAMS ---
-#define CLOUD_H_M 1.2f                  // Much closer to disk thickness (was 5.0)
+#define CLOUD_H_M 0.5f                  // Much closer to disk thickness (was 5.0)
 #define CLOUD_OUT_M 25.0f                // Perfectly matches DISK_OUT_M (was 28.0)
-#define CLOUD_OPACITY 0.45f              // Higher opacity for dense dust streaks
-#define CLOUD_LUMINOSITY 2.0f            // Highlights for the wisps
+#define CLOUD_OPACITY 0.3f              // Higher opacity for dense thundercloud look
+#define CLOUD_LUMINOSITY 0.4f            // Highlights for the wisps
 
 // Integration Quality
 #define STEP_SIZE_M 0.3f                // [M] Integration step size in vacuum
@@ -117,7 +117,20 @@ __device__ float fbm(float3 p, int octaves) {
     float a = 0.5f;
     for (int i = 0; i < octaves; ++i) {
         v += a * noise3D(p);
-        p = make_float3(p.x * 2.0f + 100.0f, p.y * 2.0f + 100.0f, p.z * 2.0f + 100.0f);
+        p = make_float3(p.x * 2.05f + 10.0f, p.y * 2.05f + 10.0f, p.z * 2.05f + 10.0f);
+        a *= 0.5f;
+    }
+    return v;
+}
+
+// Billowy noise for "fluffy" clouds
+__device__ float fbm_billow(float3 p, int octaves) {
+    float v = 0.0f;
+    float a = 0.5f;
+    for (int i = 0; i < octaves; ++i) {
+        float n = noise3D(p);
+        v += a * (1.0f - fabsf(n * 2.0f - 1.0f));
+        p = make_float3(p.x * 2.05f + 10.0f, p.y * 2.05f + 10.0f, p.z * 2.05f + 10.0f);
         a *= 0.5f;
     }
     return v;
@@ -203,47 +216,52 @@ __device__ float smoothstep(float edge0, float edge1, float x) {
  */
 __device__ float getDustCloudDensity(float3 p, float time) {
     float r = length(make_float3(p.x, 0.0f, p.z));
-    if (r < ISCO_RADIUS * 1.0f || r > CLOUD_OUT_M*1.1) return 0.0f;
+    if (r < ISCO_RADIUS || r > DISK_OUT_M) return 0.0f;
 
-    // 1. Base Envelope: Uniform density and height throughout, with radial falloff at edge
-    float local_h = CLOUD_H_M; 
+    // 1. Base Envelope: Synchronized with Disk Geometry but feathered
+    float edge_falloff = 1.0f;
+    float edge_start = DISK_OUT_M * 0.7f; // Start fading earlier
+    if (r > edge_start) {
+        edge_falloff = 1.0f - (r - edge_start) / (DISK_OUT_M - edge_start);
+        edge_falloff = smoothstep(0.0f, 1.0f, edge_falloff); // Softer curve
+    }
+
+    // Boundary Noise (Jitter the edges to make them feathery)
+    float boundary_jitter = fbm(add(mul(p, 0.15f), make_float3(0, time * 0.1f, 0)), 2);
+    edge_falloff *= smoothstep(0.3f, 0.7f, boundary_jitter + 0.2f);
+
+    // Tapered height matching the disk's vertical profile (thicker but softer)
+    float local_h = CLOUD_H_M * powf(ISCO_RADIUS / r, 0.5f); 
     float vertical_profile = expf(-(p.y * p.y) / (2.0f * local_h * local_h + 1e-7f));
+    vertical_profile = smoothstep(0.0f, 1.0f, vertical_profile); // Feathered vertical edges
     
-    // Smooth radial falloff at the outer boundary
-    float radial_falloff = smoothstep(CLOUD_OUT_M * 1.1f, CLOUD_OUT_M * 0.85f, r);
-    float base = vertical_profile * radial_falloff;
+    float base = vertical_profile * edge_falloff;
 
-    // 2. Large Scale Puffiness
+    // 2. Rigid Body Rotation (Prevents Shearing/Stretching)
     float phi = atan2f(p.z, p.x);
-    // Synced rotation: Match the omega and direction of the accretion disk
-    float omega = 3.5f * powf(ISCO_RADIUS / fmaxf(r, ISCO_RADIUS), 1.5f);
-    float angle_rot = phi - time * omega; 
+    const float CONSTANT_OMEGA = 0.5f; 
+    float angle_rot = phi - time * CONSTANT_OMEGA; 
 
-    float3 rot_p = make_float3(
-        r * cosf(angle_rot),
-        p.y * 2.0f, // Reduced stretch for much chunkier, rougher puffiness
-        r * sinf(angle_rot)
-    );
+    float3 sampling_p = make_float3(r * cosf(angle_rot), p.y, r * sinf(angle_rot));
 
-    // Increase frequency for finer, rougher detail
-    float3 noise_coords = add(mul(rot_p, 1.25f), make_float3(0, time * 0.25f, 0));
+    // Sampling frequency
+    float3 noise_coords = add(mul(sampling_p, 0.4f), make_float3(0, time * 0.05f, 0));
     
-    // Domain warping: Offset the sampling coordinates by another noise layer
-    // This creates the "rough", turbulent look from the reference image
-    float3 warp = make_float3(
+    // Domain warping
+    float3 warp_q = make_float3(
         fbm(add(noise_coords, make_float3(0.0, 0.0, 0.0)), 2),
-        fbm(add(noise_coords, make_float3(5.2, 1.3, 0.0)), 2),
-        fbm(add(noise_coords, make_float3(0.0, 9.4, 3.1)), 2)
+        fbm(add(noise_coords, make_float3(2.2, 1.3, 0.0)), 2),
+        fbm(add(noise_coords, make_float3(1.1, 4.4, 3.1)), 2)
     );
     
-    float3 final_coords = add(noise_coords, mul(warp, 0.65f));
-    float n = fbm(final_coords, 6); // High fidelity (6 octaves)
+    float3 final_coords = add(noise_coords, mul(warp_q, 1.0f)); 
+    float n = fbm_billow(final_coords, 5); 
     
-    // Sharpen the cloud structures into rough clusters
-    float cloud = fmaxf(0.0f, n - 0.42f);
-    cloud = powf(cloud * 3.5f, 2.2f); // High power factor for sharp "cloudy" peaks
+    // Feathered clumping (Using smoothstep instead of hard threshold)
+    float cloud = smoothstep(0.42f, 0.58f, n);
+    cloud = powf(cloud, 1.5f); // Gentle contrast
 
-    return base * fminf(7.0f, cloud);
+    return base * cloud * 12.0f;
 }
 /**
  * Calculates the Relativistic Beaming factor (Doppler + Gravitational Redshift)
@@ -429,10 +447,10 @@ __global__ void raymarch_kernel(uchar4* output, int width, int height, float tim
                     float lighting = 0.5f + 3.0f * powf(ISCO_RADIUS / fmaxf(r, ISCO_RADIUS), 1.2f);
                     float cloud_I = d_cloud * CLOUD_LUMINOSITY * lighting;
 
-                    // Reference: Pinkish-white highlights with dark purple base
-                    step_emit.x += 0.95f * cloud_I;
-                    step_emit.y += 0.75f * cloud_I;
-                    step_emit.z += 0.85f * cloud_I;
+                    // Greyish thundercloud colour: balanced RGB with subtle cool tint
+                    step_emit.x += 0.60f * cloud_I;
+                    step_emit.y += 0.62f * cloud_I;
+                    step_emit.z += 0.70f * cloud_I;
 
                     step_opacity += d_cloud * CLOUD_OPACITY;
                 }
