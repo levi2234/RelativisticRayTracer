@@ -12,16 +12,12 @@
 #include <iomanip>
 #include <sstream>
 #include "raymarcher.h"
+#include "config.h"
 
 #ifdef _WIN32
 #define popen _popen
 #define pclose _pclose
 #endif
-
-// --- SETTINGS ---
-const int WINDOW_WIDTH = 2200;
-const int WINDOW_HEIGHT = 1600;
-const int RECORDING_FPS = 24;
 
 // --- SCREEN RECORDER ---
 struct ScreenRecorder {
