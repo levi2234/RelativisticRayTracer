@@ -10,8 +10,8 @@
 #include "raymarcher.h"
 
 // --- SETTINGS ---
-const int WINDOW_WIDTH = 2200;
-const int WINDOW_HEIGHT = 1600;
+const int WINDOW_WIDTH = 1100;
+const int WINDOW_HEIGHT = 800;
 
 // --- CAMERA CONTROLLER ---
 struct CameraController {
@@ -21,7 +21,7 @@ struct CameraController {
     float lastX = WINDOW_WIDTH / 2.0f;
     float lastY = WINDOW_HEIGHT / 2.0f;
     bool firstMouse = true;
-    float moveSpeed = 0.15f;
+    float moveSpeed = 0.3f;
     float mouseSensitivity = 0.1f;
 
     CameraState getCUDAState() {
