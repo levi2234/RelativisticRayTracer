@@ -20,6 +20,10 @@
 #define BH_MASS_SOLAR 4.154e6f           // [M_sun] Mass in solar masses
 #define DISK_TEMP_REF 1.5e7f             // [K] Reference temperature of gas
 
+// --- NEW KERR PARAMETERS ---
+#define SPIN_A 0.4f                     // [0.0 to 1.0] Dimensionless spin parameter
+#define SPIN_AXIS make_float3(0, 1, 0)   // Rotation around Y-axis
+
 // --- SIMULATION SCALING (Geometric Units G=c=1) ---
 // Mass in meters: M = G*Mass/c^2
 #define M_UNIT (G_CONSTANT * (BH_MASS_SOLAR * SOLAR_MASS) / (C_LIGHT * C_LIGHT)) // [m]
@@ -249,24 +253,21 @@ __device__ float calculateRedshiftFactor(float3 p_rel, float3 ray_vel) {
     float r = length(p_rel);
     if (r < EVENT_HORIZON * 1.01f) return 0.0f;
 
-    // 1. Gravitational Redshift: z_g = 1 / sqrt(1 - rs/r)
+    // Gravitational Redshift (Standard)
     float g_gravity = sqrtf(1.0f - EVENT_HORIZON / r);
 
-    // 2. Doppler Shift: Light emitted by gas in circular Keplerian orbit
-    // Orbit velocity v = sqrt(rs / (2r)) for Schwarzschild
-    float v_mag = sqrtf(EVENT_HORIZON / (2.0f * r));
+    // 2. Kerr Keplerian Velocity
+    // In a rotating BH, the orbital velocity is modified: v = 1 / (r^1.5 + a)
+    // This prevents the ISCO from reaching v=c too early.
+    float v_mag = 1.0f / (powf(r, 1.5f) + SPIN_A);
     
-    // Unity vector in the direction of gas motion (tangential)
+    // Tangential gas direction (CCW around Y)
     float3 gas_dir = normalize(make_float3(-p_rel.z, 0, p_rel.x));
-    
-    // Cosine of angle between ray and gas motion
     float cos_theta = dot(ray_vel, gas_dir);
     
-    // Doppler factor (Special Relativity)
     float gamma = 1.0f / sqrtf(1.0f - v_mag * v_mag);
     float g_doppler = 1.0f / (gamma * (1.0f - v_mag * cos_theta));
 
-    // Combined g-factor
     return g_gravity * g_doppler;
 }
 
@@ -277,12 +278,22 @@ __device__ float3 getGeodesicAcc(float3 p_rel, float3 v) {
     float r = sqrtf(r2);
     if (r < EVENT_HORIZON * 0.5f) return make_float3(0,0,0);
     
-    // Schwarzschild Acceleration in units of M:
-    // a = -1.5 * Rs * L^2 / r^5  (where Rs = 2M)
+    // 1. Schwarzschild-like Radial Bending
+    // a = -1.5 * Rs * L^2 / r^5
     float3 L_vec = cross(p_rel, v);
     float L2 = dot(L_vec, L_vec);
-    float acc_mag = -1.5f * EVENT_HORIZON * L2 / (r2 * r2 * r);
-    return mul(p_rel, acc_mag);
+    float radial_mag = -1.5f * EVENT_HORIZON * L2 / (r2 * r2 * r);
+    float3 radial_acc = mul(p_rel, radial_mag);
+
+    // 2. Kerr Frame Dragging Acceleration
+    // This simulates the "twist" of space. In absolute time, we treat this
+    // as a Coriolis-like force pulling the ray in the direction of spin.
+    float3 drag_dir = cross(SPIN_AXIS, p_rel);
+    // Dragging strength falls off with 1/r^3
+    float drag_strength = (2.0f * SPIN_A * EVENT_HORIZON) / (r2 * r);
+    float3 dragging_acc = mul(drag_dir, drag_strength);
+
+    return add(radial_acc, dragging_acc);
 }
 
 // ----- INTEGRATORS -----
