@@ -34,7 +34,13 @@
 #define DISK_H_M 0.8f                    // [M] Maximum disk thickness
 #define DISK_LUMINOSITY 35.0f            // [Dimensionless] Emission gain factor
 #define DISK_OPACITY 0.7f                // [1/M] Absorption coefficient
-#define EXPOSURE 0.4f                    // [Dimensionless] Tone mapping exposure
+#define EXPOSURE 0.8f                    // [Dimensionless] Tone mapping exposure
+
+// --- DUST CLOUD LAYER PARAMS ---
+#define CLOUD_H_M 1.2f                  // Much closer to disk thickness (was 5.0)
+#define CLOUD_OUT_M 25.0f                // Perfectly matches DISK_OUT_M (was 28.0)
+#define CLOUD_OPACITY 0.45f              // Higher opacity for dense dust streaks
+#define CLOUD_LUMINOSITY 2.0f            // Highlights for the wisps
 
 // Integration Quality
 #define STEP_SIZE_M 0.3f                // [M] Integration step size in vacuum
@@ -182,9 +188,59 @@ __device__ float getAccretionDensity(float3 p, float time) {
     return base_envelope * (0.02f + 5.0f * cloud); 
 }
 
+__device__ float smoothstep(float edge0, float edge1, float x) {
+    float t = fminf(fmaxf((x - edge0) / (edge1 - edge0), 0.0f), 1.0f);
+    return t * t * (3.0f - 2.0f * t);
+}
 
+/**
+ * Calculates local density for the large-scale "Dust Cloud" layer.
+ * This layer is puffier, thicker, and slower-moving.
+ */
+__device__ float getDustCloudDensity(float3 p, float time) {
+    float r = length(make_float3(p.x, 0.0f, p.z));
+    if (r < ISCO_RADIUS * 1.0f || r > CLOUD_OUT_M*1.1) return 0.0f;
 
+    // 1. Base Envelope: Uniform density and height throughout, with radial falloff at edge
+    float local_h = CLOUD_H_M; 
+    float vertical_profile = expf(-(p.y * p.y) / (2.0f * local_h * local_h + 1e-7f));
+    
+    // Smooth radial falloff at the outer boundary
+    float radial_falloff = smoothstep(CLOUD_OUT_M * 1.1f, CLOUD_OUT_M * 0.85f, r);
+    float base = vertical_profile * radial_falloff;
 
+    // 2. Large Scale Puffiness
+    float phi = atan2f(p.z, p.x);
+    // Synced rotation: Match the omega and direction of the accretion disk
+    float omega = 3.5f * powf(ISCO_RADIUS / fmaxf(r, ISCO_RADIUS), 1.5f);
+    float angle_rot = phi - time * omega; 
+
+    float3 rot_p = make_float3(
+        r * cosf(angle_rot),
+        p.y * 2.0f, // Reduced stretch for much chunkier, rougher puffiness
+        r * sinf(angle_rot)
+    );
+
+    // Increase frequency for finer, rougher detail
+    float3 noise_coords = add(mul(rot_p, 1.25f), make_float3(0, time * 0.25f, 0));
+    
+    // Domain warping: Offset the sampling coordinates by another noise layer
+    // This creates the "rough", turbulent look from the reference image
+    float3 warp = make_float3(
+        fbm(add(noise_coords, make_float3(0.0, 0.0, 0.0)), 2),
+        fbm(add(noise_coords, make_float3(5.2, 1.3, 0.0)), 2),
+        fbm(add(noise_coords, make_float3(0.0, 9.4, 3.1)), 2)
+    );
+    
+    float3 final_coords = add(noise_coords, mul(warp, 0.65f));
+    float n = fbm(final_coords, 6); // High fidelity (6 octaves)
+    
+    // Sharpen the cloud structures into rough clusters
+    float cloud = fmaxf(0.0f, n - 0.42f);
+    cloud = powf(cloud * 3.5f, 2.2f); // High power factor for sharp "cloudy" peaks
+
+    return base * fminf(7.0f, cloud);
+}
 /**
  * Calculates the Relativistic Beaming factor (Doppler + Gravitational Redshift)
  * g = observed_frequency / emitted_frequency
@@ -320,44 +376,66 @@ __global__ void raymarch_kernel(uchar4* output, int width, int height, float tim
         float current_h = STEP_SIZE_M;
         // High quality sampling near horizon and in the gas disk zone
         bool near_bh = (r < 18.0f);
-        bool in_disk_zone = (fabsf(rel_p.y) < DISK_H_M * 4.0f && r < DISK_OUT_M + 10.0f);
+        bool in_disk_zone = (fabsf(rel_p.y) < DISK_H_M * 5.0f && r < DISK_OUT_M + 5.0f);
+        bool in_cloud_zone = (fabsf(rel_p.y) < CLOUD_H_M * 1.5f && r < CLOUD_OUT_M);
         
         if (near_bh) current_h *= 0.1f; 
         else if (in_disk_zone) current_h *= 0.3f;
+        else if (in_cloud_zone) current_h *= 0.5f;
 
         integrate_rk4(p, vel, current_h);
 
 
 
 
-        // --- RADIATIVE TRANSFER ---
-        if (in_disk_zone) {
-            float density = getAccretionDensity(rel_p, time);
-            if (density > 0.001f) {
-                float g = calculateRedshiftFactor(rel_p, vel);
-                float T = getDiskTemperature(r);
-                
-                // Relativistic Invariant: I_obs = g^4 * [Bolometric Intensity]
-                // Power 0.5 for T creates a very slow visual falloff
-                float T_norm = powf(T / DISK_TEMP_REF, 0.5f);
-                float bol_I = powf(g, 4.0f) * T_norm * density * DISK_LUMINOSITY;
-                
-                // Color mapping: Aggressively shifted towards deep orange-red (Killing yellow/green)
-                float color_t = g * powf(T / DISK_TEMP_REF, 0.4f) * 2.5f;
-                float r_emit = 1.0f;
-                float g_emit = fminf(0.25f, 0.12f * color_t);        // Heavily reduced green to kill yellow
-                float b_emit = fmaxf(0.0f, 0.01f * (color_t - 2.0f)); // Almost no blue
+        // --- RADIATIVE TRANSFER (INTEGRATED MEDIA) ---
+        if (in_disk_zone || in_cloud_zone) {
+            float d_disk = in_disk_zone ? getAccretionDensity(rel_p, time) : 0.0f; //TOGGLE TO ENABLE OR DISABLE
+            float d_cloud = 0.0f;//in_cloud_zone ? getDustCloudDensity(rel_p, time) : 0.0f; //TOGGLE TO ENABLE OR DISABLE
 
-                // Physical absorption (Beer-Lambert Law) using new DISK_OPACITY
-                float d_tau = density * DISK_OPACITY * current_h; 
+            if (d_disk > 0.001f || d_cloud > 0.001f) {
+                float3 step_emit = make_float3(0, 0, 0);
+                float step_opacity = 0;
+
+                // 1. Accretion Disk Component
+                if (d_disk > 0.001f) {
+                    float g = calculateRedshiftFactor(rel_p, vel);
+                    float T = getDiskTemperature(r);
+                    float T_norm = powf(T / DISK_TEMP_REF, 0.5f);
+                    float bol_I = powf(g, 4.0f) * T_norm * d_disk * DISK_LUMINOSITY;
+                    
+                    float color_t = g * powf(T / DISK_TEMP_REF, 0.4f) * 2.5f;
+                    step_emit.x += 1.0f * bol_I;
+                    step_emit.y += fminf(0.25f, 0.12f * color_t) * bol_I;
+                    step_emit.z += fmaxf(0.0f, 0.01f * (color_t - 2.0f)) * bol_I;
+                    
+                    step_opacity += d_disk * DISK_OPACITY;
+                }
+
+                // 2. Dust Cloud Component (Interleaved)
+                if (d_cloud > 0.001f) {
+                    // Proximal lighting: clouds near the disk glow whiter/brighter
+                    float lighting = 0.5f + 3.0f * powf(ISCO_RADIUS / fmaxf(r, ISCO_RADIUS), 1.2f);
+                    float cloud_I = d_cloud * CLOUD_LUMINOSITY * lighting;
+
+                    // Reference: Pinkish-white highlights with dark purple base
+                    step_emit.x += 0.95f * cloud_I;
+                    step_emit.y += 0.75f * cloud_I;
+                    step_emit.z += 0.85f * cloud_I;
+
+                    step_opacity += d_cloud * CLOUD_OPACITY;
+                }
+
+                // Unified physical integration for current ray step
+                float d_tau = step_opacity * current_h;
                 float step_trans = expf(-d_tau);
+                float factor = (1.0f - step_trans) * transmittance;
 
-                intensity_r += r_emit * bol_I * (1.0f - step_trans) * transmittance;
-                intensity_g += g_emit * bol_I * (1.0f - step_trans) * transmittance;
-                intensity_b += b_emit * bol_I * (1.0f - step_trans) * transmittance;
+                intensity_r += step_emit.x * factor;
+                intensity_g += step_emit.y * factor;
+                intensity_b += step_emit.z * factor;
                 
                 transmittance *= step_trans;
-                if (transmittance < 0.01f) break;
             }
         }
 
