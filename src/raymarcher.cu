@@ -36,8 +36,8 @@
 #define ISCO_RADIUS 10.0f                 // [M] Innermost stable orbit (6M for non-spinning)
 #define DISK_OUT_M 25.0f                // [M] Outer radius of disk
 #define DISK_H_M 0.8f                    // [M] Maximum disk thickness
-#define DISK_LUMINOSITY 35.0f            // [Dimensionless] Emission gain factor
-#define DISK_OPACITY 0.7f                // [1/M] Absorption coefficient
+#define DISK_LUMINOSITY 6.0f            // [Dimensionless] Emission gain factor
+#define DISK_OPACITY 0.4f                // [1/M] Absorption coefficient
 #define EXPOSURE 0.8f                    // [Dimensionless] Tone mapping exposure
 
 // --- DUST CLOUD LAYER PARAMS ---
@@ -402,7 +402,7 @@ __global__ void raymarch_kernel(uchar4* output, int width, int height, float tim
         // --- RADIATIVE TRANSFER (INTEGRATED MEDIA) ---
         if (in_disk_zone || in_cloud_zone) {
             float d_disk = in_disk_zone ? getAccretionDensity(rel_p, time) : 0.0f; //TOGGLE TO ENABLE OR DISABLE
-            float d_cloud = 0.0f;//in_cloud_zone ? getDustCloudDensity(rel_p, time) : 0.0f; //TOGGLE TO ENABLE OR DISABLE
+            float d_cloud = in_cloud_zone ? getDustCloudDensity(rel_p, time) : 0.0f; //TOGGLE TO ENABLE OR DISABLE
 
             if (d_disk > 0.001f || d_cloud > 0.001f) {
                 float3 step_emit = make_float3(0, 0, 0);
