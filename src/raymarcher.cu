@@ -75,6 +75,44 @@ __device__ float3 mul(float3 v, float s) {
     return make_float3(v.x * s, v.y * s, v.z * s);
 }
 
+// --- NOISE HELPERS ---
+
+__device__ float lerp(float a, float b, float t) {
+    return a + t * (b - a);
+}
+
+__device__ float hash31(float3 p) {
+    float3 p3 = make_float3(fmodf(p.x * 0.1031f, 1.0f), fmodf(p.y * 0.1031f, 1.0f), fmodf(p.z * 0.1031f, 1.0f));
+    float d = p3.x * (p3.y + 33.33f) + p3.y * (p3.z + 33.33f) + p3.z * (p3.x + 33.33f);
+    p3.x += d; p3.y += d; p3.z += d;
+    return fmodf((p3.x + p3.y) * p3.z, 1.0f);
+}
+
+__device__ float noise3D(float3 p) {
+    float3 i = make_float3(floorf(p.x), floorf(p.y), floorf(p.z));
+    float3 f = make_float3(p.x - i.x, p.y - i.y, p.z - i.z);
+    
+    float3 u = make_float3(f.x * f.x * (3.0f - 2.0f * f.x),
+                          f.y * f.y * (3.0f - 2.0f * f.y),
+                          f.z * f.z * (3.0f - 2.0f * f.z));
+    
+    return lerp(lerp(lerp(hash31(add(i, make_float3(0, 0, 0))), hash31(add(i, make_float3(1, 0, 0))), u.x),
+                    lerp(hash31(add(i, make_float3(0, 1, 0))), hash31(add(i, make_float3(1, 1, 0))), u.x), u.y),
+               lerp(lerp(hash31(add(i, make_float3(0, 0, 1))), hash31(add(i, make_float3(1, 0, 1))), u.x),
+                    lerp(hash31(add(i, make_float3(0, 1, 1))), hash31(add(i, make_float3(1, 1, 1))), u.x), u.y), u.z);
+}
+
+__device__ float fbm(float3 p, int octaves) {
+    float v = 0.0f;
+    float a = 0.5f;
+    for (int i = 0; i < octaves; ++i) {
+        v += a * noise3D(p);
+        p = make_float3(p.x * 2.0f + 100.0f, p.y * 2.0f + 100.0f, p.z * 2.0f + 100.0f);
+        a *= 0.5f;
+    }
+    return v;
+}
+
 // --- PHYSICS FUNCTIONS ---
 
 /**
@@ -87,28 +125,46 @@ __device__ float getDiskTemperature(float r) {
 }
 
 /**
- * Calculates local gas density with vertical tapering.
+ * Calculates local gas density with rotating high-fidelity clouds.
  */
-__device__ float getAccretionDensity(float3 p) {
+__device__ float getAccretionDensity(float3 p, float time) {
     float r = length(make_float3(p.x, 0.0f, p.z));
     if (r < ISCO_RADIUS || r > DISK_OUT_M) return 0.0f;
 
-    // Smooth edge falloff (Tapering)
+    // 1. Base Envelope (Tapering)
     float edge_falloff = 1.0f;
-    float edge_start = DISK_OUT_M * 0.8f;
+    float edge_start = DISK_OUT_M * 0.85f;
     if (r > edge_start) {
         edge_falloff = 1.0f - (r - edge_start) / (DISK_OUT_M - edge_start);
-        edge_falloff = edge_falloff * edge_falloff; // Quadratic taper
+        edge_falloff *= edge_falloff;
     }
 
-    // Tapered thickness: disk gets thinner as it moves out
     float local_h = DISK_H_M * powf(ISCO_RADIUS / r, 0.5f);
+    float vertical_density = expf(-(p.y * p.y) / (2.0f * local_h * local_h + 1e-7f));
+    float radial_density = powf(ISCO_RADIUS / r, 0.4f);
+    float base_envelope = vertical_density * radial_density * edge_falloff;
 
-    // Gaussian vertical profile
-    float density = expf(-(p.y * p.y) / (2.0f * local_h * local_h + 1e-7f));
+    // 2. High-Fidelity Multi-Octave Clouds
+    float phi = atan2f(p.z, p.x);
     
-    // Radial density falloff
-    return density * powf(ISCO_RADIUS / r, 0.35f) * edge_falloff;
+    // Transform coordinates for noise (Cylindrical with spiral warp)
+    // Scale: r (radial), phi (azimuthal), y (vertical)
+    float3 noise_p = make_float3(r * 0.35f, (phi + r * 0.15f) * 6.0f, p.y * 1.5f);
+    
+    // Differential rotation: Inner parts move faster
+    float omega = 1.0f * powf(ISCO_RADIUS / r, 1.5f); 
+    noise_p.y += time * omega * 2.0f;
+
+    // Sample high-fidelity noise
+    float n = fbm(noise_p, 5); // 5 octaves for high fidelity
+
+    // Cloud thresholding & modulation
+    // We use a smoothstep-like function to create sharp gaps between clouds
+    float cloud = n - 0.25f; // Bias towards empty space
+    cloud = fmaxf(0.0f, cloud * 1.5f);
+    cloud = cloud / (0.1f + cloud); // Soft contrast
+
+    return base_envelope * (0.1f + 2.5f * cloud); 
 }
 
 
@@ -261,7 +317,7 @@ __global__ void raymarch_kernel(uchar4* output, int width, int height, float tim
 
         // --- RADIATIVE TRANSFER ---
         if (in_disk_zone) {
-            float density = getAccretionDensity(rel_p);
+            float density = getAccretionDensity(rel_p, time);
             if (density > 0.001f) {
                 float g = calculateRedshiftFactor(rel_p, vel);
                 float T = getDiskTemperature(r);
