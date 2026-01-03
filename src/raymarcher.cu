@@ -21,7 +21,7 @@
 #define DISK_TEMP_REF 1.5e7f             // [K] Reference temperature of gas
 
 // --- NEW KERR PARAMETERS ---
-#define SPIN_A 0.4f                     // [0.0 to 1.0] Dimensionless spin parameter
+#define SPIN_A 0.7f                     // [0.0 to 1.0] Dimensionless spin parameter
 #define SPIN_AXIS make_float3(0, 1, 0)   // Rotation around Y-axis
 
 // --- SIMULATION SCALING (Geometric Units G=c=1) ---
@@ -263,6 +263,8 @@ __device__ float getDustCloudDensity(float3 p, float time) {
 
     return base * cloud * 12.0f;
 }
+
+
 /**
  * Calculates the Relativistic Beaming factor (Doppler + Gravitational Redshift)
  * g = observed_frequency / emitted_frequency

@@ -7,11 +7,119 @@
 #include <iostream>
 #include <vector>
 #include <cmath>
+#include <cstdio>
+#include <chrono>
+#include <iomanip>
+#include <sstream>
 #include "raymarcher.h"
 
+#ifdef _WIN32
+#define popen _popen
+#define pclose _pclose
+#endif
+
 // --- SETTINGS ---
-const int WINDOW_WIDTH = 1100;
-const int WINDOW_HEIGHT = 800;
+const int WINDOW_WIDTH = 2200;
+const int WINDOW_HEIGHT = 1600;
+const int RECORDING_FPS = 24;
+
+// --- SCREEN RECORDER ---
+struct ScreenRecorder {
+    FILE* ffmpeg = nullptr;
+    std::vector<unsigned char> frameBuffer;
+    bool isRecording = false;
+    int frameCount = 0;
+    std::string currentFilename;
+
+    std::string generateFilename() {
+        auto now = std::chrono::system_clock::now();
+        auto time = std::chrono::system_clock::to_time_t(now);
+        std::tm tm;
+#ifdef _WIN32
+        localtime_s(&tm, &time);
+#else
+        localtime_r(&time, &tm);
+#endif
+        std::ostringstream oss;
+        oss << "recording_" 
+            << std::put_time(&tm, "%Y%m%d_%H%M%S") 
+            << ".mp4";
+        return oss.str();
+    }
+
+    bool startRecording(int width, int height) {
+        if (isRecording) return false;
+
+        frameBuffer.resize(width * height * 4);
+        currentFilename = generateFilename();
+        frameCount = 0;
+
+        // Build FFmpeg command for raw RGBA input -> H.264 MP4 output
+        std::ostringstream cmd;
+        cmd << "ffmpeg -y "                           // Overwrite output
+            << "-f rawvideo "                         // Input format
+            << "-pix_fmt rgba "                       // Pixel format
+            << "-s " << width << "x" << height << " " // Frame size
+            << "-r " << RECORDING_FPS << " "          // Input framerate
+            << "-i - "                                // Read from stdin
+            << "-vf vflip "                           // Flip vertically (OpenGL origin is bottom-left)
+            << "-c:v libx264 "                        // H.264 codec
+            << "-preset fast "                        // Encoding speed/quality tradeoff
+            << "-crf 18 "                             // Quality (lower = better, 18 is visually lossless)
+            << "-pix_fmt yuv420p "                    // Output pixel format for compatibility
+            << "\"" << currentFilename << "\"";
+
+        ffmpeg = popen(cmd.str().c_str(), "wb");
+        if (!ffmpeg) {
+            std::cerr << "Failed to start FFmpeg. Make sure FFmpeg is installed and in PATH." << std::endl;
+            return false;
+        }
+
+        isRecording = true;
+        std::cout << "Recording started: " << currentFilename << std::endl;
+        return true;
+    }
+
+    void captureFrame(int width, int height) {
+        if (!isRecording || !ffmpeg) return;
+
+        // Read pixels from OpenGL framebuffer
+        glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, frameBuffer.data());
+        
+        // Write frame to FFmpeg
+        size_t written = fwrite(frameBuffer.data(), 1, frameBuffer.size(), ffmpeg);
+        if (written != frameBuffer.size()) {
+            std::cerr << "Warning: Frame write incomplete" << std::endl;
+        }
+        frameCount++;
+    }
+
+    void stopRecording() {
+        if (!isRecording) return;
+
+        if (ffmpeg) {
+            pclose(ffmpeg);
+            ffmpeg = nullptr;
+        }
+
+        isRecording = false;
+        std::cout << "Recording stopped: " << currentFilename 
+                  << " (" << frameCount << " frames, ~" 
+                  << (frameCount / RECORDING_FPS) << "s)" << std::endl;
+    }
+
+    void toggle(int width, int height) {
+        if (isRecording) {
+            stopRecording();
+        } else {
+            startRecording(width, height);
+        }
+    }
+
+    ~ScreenRecorder() {
+        stopRecording();
+    }
+} g_Recorder;
 
 // --- CAMERA CONTROLLER ---
 struct CameraController {
@@ -100,6 +208,16 @@ void loadSkybox(const char* filename) {
 }
 
 // --- CALLBACKS ---
+
+void key_callback(GLFWwindow* window, int key, int scancode, int action, int mods) {
+    (void)scancode; (void)mods; // Unused parameters
+    if (key == GLFW_KEY_R && action == GLFW_PRESS) {
+        g_Recorder.toggle(WINDOW_WIDTH, WINDOW_HEIGHT);
+    }
+    if (key == GLFW_KEY_ESCAPE && action == GLFW_PRESS) {
+        glfwSetWindowShouldClose(window, true);
+    }
+}
 
 void mouse_callback(GLFWwindow* window, double xposIn, double yposIn) {
     float xpos = static_cast<float>(xposIn);
@@ -239,8 +357,13 @@ void updateFPS(GLFWwindow* window) {
     nbFrames++;
     if (delta >= 1.0) {
         double fps = double(nbFrames) / delta;
-        char title[128];
-        sprintf(title, "Relativistic Ray Tracer | FPS: %.1f", fps);
+        char title[256];
+        if (g_Recorder.isRecording) {
+            sprintf(title, "Relativistic Ray Tracer | FPS: %.1f | [REC] %d frames", 
+                    fps, g_Recorder.frameCount);
+        } else {
+            sprintf(title, "Relativistic Ray Tracer | FPS: %.1f | Press R to record", fps);
+        }
         glfwSetWindowTitle(window, title);
         nbFrames = 0;
         lastTime = currentTime;
@@ -281,6 +404,7 @@ int main() {
     if (!window) return -1;
     glfwMakeContextCurrent(window);
     glfwSetCursorPosCallback(window, mouse_callback);
+    glfwSetKeyCallback(window, key_callback);
     glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
     if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress)) return -1;
 
@@ -292,12 +416,19 @@ int main() {
         updateFPS(window);
         processInput(window);
         renderFrame();
+        
+        // Capture frame for recording (after render, before swap)
+        if (g_Recorder.isRecording) {
+            g_Recorder.captureFrame(WINDOW_WIDTH, WINDOW_HEIGHT);
+        }
+        
         glfwSwapBuffers(window);
         glfwPollEvents();
-        if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS)
-            glfwSetWindowShouldClose(window, true);
     }
 
+    // Cleanup
+    g_Recorder.stopRecording();  // Ensure recording is stopped and file is finalized
+    
     if (g_State.skyboxTexObj) cudaDestroyTextureObject(g_State.skyboxTexObj);
     if (g_State.skyboxArray) cudaFreeArray(g_State.skyboxArray);
     
