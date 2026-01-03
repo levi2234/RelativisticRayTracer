@@ -231,6 +231,22 @@ void initGLResources() {
     cudaGraphicsGLRegisterBuffer(&g_State.cudaResource, g_State.pbo, cudaGraphicsRegisterFlagsWriteDiscard);
 }
 
+void updateFPS(GLFWwindow* window) {
+    static double lastTime = 0.0;
+    static int nbFrames = 0;
+    double currentTime = glfwGetTime();
+    double delta = currentTime - lastTime;
+    nbFrames++;
+    if (delta >= 1.0) {
+        double fps = double(nbFrames) / delta;
+        char title[128];
+        sprintf(title, "Relativistic Ray Tracer | FPS: %.1f", fps);
+        glfwSetWindowTitle(window, title);
+        nbFrames = 0;
+        lastTime = currentTime;
+    }
+}
+
 void renderFrame() {
     static float time = 0.0f;
     time += 0.016f;
@@ -273,6 +289,7 @@ int main() {
 
 
     while (!glfwWindowShouldClose(window)) {
+        updateFPS(window);
         processInput(window);
         renderFrame();
         glfwSwapBuffers(window);
