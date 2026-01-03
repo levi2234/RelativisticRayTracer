@@ -57,7 +57,7 @@ __global__ void raymarch_kernel(uchar4* output, int width, int height, float tim
 
         // --- RADIATIVE TRANSFER (INTEGRATED MEDIA) ---
         if (in_disk_zone || in_cloud_zone) {
-            float d_disk = 0.0f;//in_disk_zone ? getAccretionDensity(rel_p, time) : 0.0f; 
+            float d_disk = in_disk_zone ? getAccretionDensity(rel_p, time) : 0.0f; 
             float d_cloud = in_cloud_zone ? getDustCloudDensity(rel_p, time) : 0.0f; 
 
             if (d_disk > 0.001f || d_cloud > 0.001f) {
@@ -81,12 +81,22 @@ __global__ void raymarch_kernel(uchar4* output, int width, int height, float tim
 
                 // 2. Dust Cloud Component (Interleaved)
                 if (d_cloud > 0.001f) {
+                    float g = calculateRedshiftFactor(rel_p, vel);
                     float lighting = 0.5f + 3.0f * powf(ISCO_RADIUS / fmaxf(r, ISCO_RADIUS), 1.2f);
                     float cloud_I = d_cloud * CLOUD_LUMINOSITY * lighting;
 
-                    step_emit.x += 0.60f * cloud_I;
-                    step_emit.y += 0.62f * cloud_I;
-                    step_emit.z += 0.70f * cloud_I;
+                    // --- REDSHIFT COLOR GRADING ---
+                    // g > 1.0: Blue-shift (approaching), g < 1.0: Red-shift (receding)
+                    // We map g to a color shift to make the disk less uniform
+                    float shift = smoothstep(0.7f, 1.3f, g);
+                    
+                    // Base color is greyish blue
+                    float3 base_color = make_float3(0.60f, 0.65f, 0.80f);
+                    
+                    // Shift: Approaching (Blue/White) vs Receding (Deep Red/Grey)
+                    step_emit.x += base_color.x * cloud_I * lerp(1.2f, 0.8f, shift);
+                    step_emit.y += base_color.y * cloud_I * lerp(0.8f, 1.1f, shift);
+                    step_emit.z += base_color.z * cloud_I * lerp(0.6f, 1.4f, shift);
 
                     step_opacity += d_cloud * CLOUD_OPACITY;
                 }

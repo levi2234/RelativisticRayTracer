@@ -63,47 +63,72 @@ __device__ __forceinline__ float getAccretionDensity(float3 p, float time) {
 
 /**
  * Calculates local density for the large-scale "Dust Cloud" layer.
+ * Optimized for the Blue/Wispy reference: 
+ * Fluid, turbulent filaments without digital banding.
  */
 __device__ __forceinline__ float getDustCloudDensity(float3 p, float time) {
     float r = length(make_float3(p.x, 0.0f, p.z));
     if (r < ISCO_RADIUS || r > DISK_OUT_M) return 0.0f;
 
-    float edge_falloff = 1.0f;
-    float edge_start = DISK_OUT_M * 0.7f;
-    if (r > edge_start) {
-        edge_falloff = 1.0f - (r - edge_start) / (DISK_OUT_M - edge_start);
-        edge_falloff = smoothstep(0.0f, 1.0f, edge_falloff);
-    }
-
-    float boundary_jitter = fbm(add(mul(p, 0.15f), make_float3(0, time * 0.1f, 0)), 2);
-    edge_falloff *= smoothstep(0.3f, 0.7f, boundary_jitter + 0.2f);
-
-    float local_h = CLOUD_H_M * powf(ISCO_RADIUS / r, 0.5f); 
+    // 1. Base Envelope
+    float edge_falloff = smoothstep(DISK_OUT_M, DISK_OUT_M * 0.8f, r);
+    
+    // INNER TAPER: Soften the density near the ISCO so we can see the horizon/lensing
+    float inner_taper = smoothstep(ISCO_RADIUS, ISCO_RADIUS + 5.0f, r);
+    
+    // Thinner disk overall, especially near the center
+    float local_h = CLOUD_H_M * 0.5f * powf(ISCO_RADIUS / r, 0.2f); 
     float vertical_profile = expf(-(p.y * p.y) / (2.0f * local_h * local_h + 1e-7f));
-    vertical_profile = smoothstep(0.0f, 1.0f, vertical_profile);
     
-    float base = vertical_profile * edge_falloff;
+    float base = vertical_profile * edge_falloff * inner_taper;
+    
+    if (base < 0.001f) return 0.0f;
 
+    // 2. DIFFERENTIAL SHEARING
     float phi = atan2f(p.z, p.x);
-    const float CONSTANT_OMEGA = 0.5f; 
-    float angle_rot = phi - time * CONSTANT_OMEGA; 
+    float omega = 1.0f * powf(ISCO_RADIUS / r, 1.5f); 
+    float angle_rot = phi - time * omega; 
 
-    float3 sampling_p = make_float3(r * cosf(angle_rot), p.y, r * sinf(angle_rot));
-    float3 noise_coords = add(mul(sampling_p, 0.4f), make_float3(0, time * 0.05f, 0));
+    // 3. FLUID DOMAIN WARPING
+    float3 coords = make_float3(r * 0.8f, p.y * 15.0f, angle_rot * 10.0f);
     
-    float3 warp_q = make_float3(
-        fbm(add(noise_coords, make_float3(0.0, 0.0, 0.0)), 2),
-        fbm(add(noise_coords, make_float3(2.2, 1.3, 0.0)), 2),
-        fbm(add(noise_coords, make_float3(1.1, 4.4, 3.1)), 2)
+    float3 w1 = make_float3(
+        fbm(mul(coords, 0.15f), 2),
+        fbm(add(mul(coords, 0.15f), make_float3(1,2,3)), 2),
+        fbm(add(mul(coords, 0.15f), make_float3(4,5,6)), 2)
     );
     
-    float3 final_coords = add(noise_coords, mul(warp_q, 1.0f)); 
-    float n = fbm_billow(final_coords, 5); 
-    
-    float cloud = smoothstep(0.42f, 0.58f, n);
-    cloud = powf(cloud, 1.5f);
+    float3 w2_coords = add(coords, mul(w1, 3.0f));
+    float3 w2 = make_float3(
+        fbm(mul(w2_coords, 0.4f), 2),
+        fbm(add(mul(w2_coords, 0.4f), make_float3(2,1,0)), 2),
+        fbm(add(mul(w2_coords, 0.4f), make_float3(0,3,1)), 2)
+    );
 
-    return base * cloud * 12.0f;
+    float3 final_coords = add(coords, mul(w2, 1.5f));
+
+    // 4. MULTI-OCTAVE WISPS
+    float n = 0.0f;
+    float amp = 1.0f;
+    float freq = 1.0f;
+    for(int i = 0; i < 5; i++) {
+        float noise_val = noise3D(mul(final_coords, freq));
+        float wisp = 1.0f - fabsf(noise_val * 2.0f - 1.0f);
+        n += wisp * amp;
+        amp *= 0.5f;
+        freq *= 2.1f;
+    }
+
+    // 5. CONTRAST & TRANSPARENCY
+    // Lower the floor and increase the contrast to allow more light through
+    float strands = smoothstep(0.4f, 0.8f, n * 0.55f);
+    strands = powf(strands, 4.0f); 
+    
+    float detail = fbm(add(mul(final_coords, 4.0f), make_float3(0, time * 0.5f, 0)), 2);
+    strands *= (0.6f + 0.4f * detail);
+
+    // Reduced density multiplier (from 20.0 to 12.0) for more transparency
+    return base * strands * 12.0f;
 }
 
 #endif
