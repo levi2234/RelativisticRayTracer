@@ -34,7 +34,7 @@
 #define DISK_H_M 0.8f                    // [M] Maximum disk thickness
 #define DISK_LUMINOSITY 35.0f            // [Dimensionless] Emission gain factor
 #define DISK_OPACITY 0.7f                // [1/M] Absorption coefficient
-#define EXPOSURE 0.8f                    // [Dimensionless] Tone mapping exposure
+#define EXPOSURE 0.4f                    // [Dimensionless] Tone mapping exposure
 
 // Integration Quality
 #define STEP_SIZE_M 0.3f                // [M] Integration step size in vacuum
@@ -156,24 +156,30 @@ __device__ float getAccretionDensity(float3 p, float time) {
     // This ensures clouds follow circular orbits perfectly.
     float3 rot_p = make_float3(
         r * cosf(angle_rotated),
-        p.y * 2.0f, // Scale vertical more for flatter clouds
+        p.y * 4.0f, // Stretch vertical sampling to make filaments flatter
         r * sinf(angle_rotated)
     );
     
     // Add "boiling" / internal evolution by shifting the noise in the revolving frame
-    float evolution = time * 0.5f;
-    float3 noise_coords = add(mul(rot_p, 0.35f), make_float3(0, evolution, 0));
+    float evolution = time * 0.35f;
+    float3 noise_coords = add(mul(rot_p, 0.45f), make_float3(0, evolution, 0));
 
     // Sample high-fidelity noise
     float n = fbm(noise_coords, 5); 
 
-    // Cloud thresholding & modulation
-    // We use a smoothstep-like function to create sharp gaps between clouds
-    float cloud = n - 0.25f; // Bias towards empty space
-    cloud = fmaxf(0.0f, cloud * 1.5f);
-    cloud = cloud / (0.1f + cloud); // Soft contrast
+    // --- HIGH CONTRAST STREAKS ---
+    // 1. Bias: Higher value clears out the "gas" between clouds (more vacuum)
+    float cloud = fmaxf(0.0f, n - 0.32f); 
+    
+    // 2. Gain/Power: Increases the "sharpness" of the filament edges
+    cloud = powf(cloud * 2.8f, 1.6f);
+    
+    // 3. Clamping: Prevent extreme density spikes
+    cloud = fminf(6.0f, cloud);
 
-    return base_envelope * (0.1f + 2.5f * cloud); 
+    // Return density with high contrast between clouds and vacuum
+    // Reduced base level to 0.02 for cleaner gaps
+    return base_envelope * (0.02f + 5.0f * cloud); 
 }
 
 
@@ -336,11 +342,11 @@ __global__ void raymarch_kernel(uchar4* output, int width, int height, float tim
                 float T_norm = powf(T / DISK_TEMP_REF, 0.5f);
                 float bol_I = powf(g, 4.0f) * T_norm * density * DISK_LUMINOSITY;
                 
-                // Color mapping: Shifted towards orange-red spectrum
+                // Color mapping: Aggressively shifted towards deep orange-red (Killing yellow/green)
                 float color_t = g * powf(T / DISK_TEMP_REF, 0.4f) * 2.5f;
                 float r_emit = 1.0f;
-                float g_emit = fminf(0.55f, 0.3f * color_t);        // Lowered green for orange
-                float b_emit = fmaxf(0.0f, 0.05f * (color_t - 1.2f)); // Very low blue
+                float g_emit = fminf(0.25f, 0.12f * color_t);        // Heavily reduced green to kill yellow
+                float b_emit = fmaxf(0.0f, 0.01f * (color_t - 2.0f)); // Almost no blue
 
                 // Physical absorption (Beer-Lambert Law) using new DISK_OPACITY
                 float d_tau = density * DISK_OPACITY * current_h; 
