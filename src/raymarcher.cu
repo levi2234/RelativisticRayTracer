@@ -147,16 +147,25 @@ __device__ float getAccretionDensity(float3 p, float time) {
     // 2. High-Fidelity Multi-Octave Clouds
     float phi = atan2f(p.z, p.x);
     
-    // Transform coordinates for noise (Cylindrical with spiral warp)
-    // Scale: r (radial), phi (azimuthal), y (vertical)
-    float3 noise_p = make_float3(r * 0.35f, (phi + r * 0.15f) * 6.0f, p.y * 1.5f);
+    // Differential rotation: Inner parts move faster (Keplerian)
+    // direction matches the gas velocity used in calculateRedshiftFactor (CCW)
+    float omega = 3.5f * powf(ISCO_RADIUS / r, 1.5f); 
+    float angle_rotated = phi - time * omega;
+
+    // Use a rotating coordinate system to sampling noise.
+    // This ensures clouds follow circular orbits perfectly.
+    float3 rot_p = make_float3(
+        r * cosf(angle_rotated),
+        p.y * 2.0f, // Scale vertical more for flatter clouds
+        r * sinf(angle_rotated)
+    );
     
-    // Differential rotation: Inner parts move faster
-    float omega = 1.0f * powf(ISCO_RADIUS / r, 1.5f); 
-    noise_p.y += time * omega * 2.0f;
+    // Add "boiling" / internal evolution by shifting the noise in the revolving frame
+    float evolution = time * 0.5f;
+    float3 noise_coords = add(mul(rot_p, 0.35f), make_float3(0, evolution, 0));
 
     // Sample high-fidelity noise
-    float n = fbm(noise_p, 5); // 5 octaves for high fidelity
+    float n = fbm(noise_coords, 5); 
 
     // Cloud thresholding & modulation
     // We use a smoothstep-like function to create sharp gaps between clouds
