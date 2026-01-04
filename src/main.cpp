@@ -15,11 +15,15 @@
 #include "raymarcher.h"
 #include "config.h"
 #include "camera_paths.h"
+#include "camera_effects/camera_settings.h"
 
 #ifdef _WIN32
 #define popen _popen
 #define pclose _pclose
 #endif
+
+// --- GLOBAL SETTINGS ---
+CameraEffects g_Effects;
 
 // --- SCREEN RECORDER ---
 struct ScreenRecorder {
@@ -274,8 +278,28 @@ void key_callback(GLFWwindow* window, int key, int scancode, int action, int mod
     }
     if (key == GLFW_KEY_N && action == GLFW_PRESS) {
         g_Path.nextPath();
-        std::cout << "Switched to path: " << PathManager::instance().getPath(g_Path.currentPathIndex)->name << std::endl;
+        const CameraPath* path = PathManager::instance().getPath(g_Path.currentPathIndex);
+        if (path) std::cout << "Switched to path: " << path->name << std::endl;
     }
+    
+    // Camera Effect Toggles
+    if (key == GLFW_KEY_B && action == GLFW_PRESS) {
+        g_Effects.useBloom = !g_Effects.useBloom;
+        std::cout << "Bloom: " << (g_Effects.useBloom ? "ON" : "OFF") << std::endl;
+    }
+    if (key == GLFW_KEY_V && action == GLFW_PRESS) {
+        g_Effects.useVignette = !g_Effects.useVignette;
+        std::cout << "Vignette: " << (g_Effects.useVignette ? "ON" : "OFF") << std::endl;
+    }
+    if (key == GLFW_KEY_L && action == GLFW_PRESS) {
+        g_Effects.useLensDistortion = !g_Effects.useLensDistortion;
+        std::cout << "Lens Distortion: " << (g_Effects.useLensDistortion ? "ON" : "OFF") << std::endl;
+    }
+    if (key == GLFW_KEY_C && action == GLFW_PRESS) {
+        g_Effects.useChromaticAberration = !g_Effects.useChromaticAberration;
+        std::cout << "Chromatic Aberration: " << (g_Effects.useChromaticAberration ? "ON" : "OFF") << std::endl;
+    }
+
     if (key == GLFW_KEY_ESCAPE && action == GLFW_PRESS) {
         glfwSetWindowShouldClose(window, true);
     }
@@ -440,7 +464,7 @@ void renderFrame(float simTime) {
     cudaGraphicsResourceGetMappedPointer((void**)&d_out, &size, g_State.cudaResource);
 
     CameraState camState = g_Path.active ? g_Path.getInterpolatedState() : g_Camera.getCUDAState();
-    launch_raymarch(d_out, WINDOW_WIDTH, WINDOW_HEIGHT, simTime, camState, g_State.skyboxTexObj);
+    launch_raymarch(d_out, WINDOW_WIDTH, WINDOW_HEIGHT, simTime, camState, g_State.skyboxTexObj, g_Effects);
 
     cudaGraphicsUnmapResources(1, &g_State.cudaResource, 0);
 

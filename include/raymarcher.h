@@ -3,6 +3,7 @@
 
 #include <vector_types.h>
 #include <texture_types.h>
+#include "camera_effects/camera_settings.h"
 
 /**
  * Camera state to be passed from C++ (Host) to CUDA (Device).
@@ -15,7 +16,6 @@ struct CameraState {
 };
 
 // Wrapper function to launch the CUDA kernel
-// Added skyboxTex parameter for the texture skybox
-void launch_raymarch(uchar4* d_out, int w, int h, float time, CameraState cam, cudaTextureObject_t skyboxTex);
+void launch_raymarch(uchar4* d_out, int w, int h, float time, CameraState cam, cudaTextureObject_t skyboxTex, CameraEffects effects);
 
 #endif

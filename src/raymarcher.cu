@@ -8,16 +8,24 @@
 #include "densities.h"
 #include "geodesics.h"
 #include "integrators.h"
+#include "camera_effects/post_processing.h"
 
 // --- RENDER KERNEL ---
 
-__global__ void raymarch_kernel(uchar4* output, int width, int height, float time, CameraState cam, cudaTextureObject_t skyboxTex) {
+__global__ void raymarch_kernel(uchar4* output, int width, int height, float time, CameraState cam, cudaTextureObject_t skyboxTex, CameraEffects effects) {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
     if (x >= width || y >= height) return;
 
-    float u_coord = (float)x / width * 2.0f - 1.0f;
-    float v_coord = (float)y / height * 2.0f - 1.0f;
+    float2 uv = make_float2((float)x / width, (float)y / height);
+    
+    // 1. Apply Lens Distortion (Barrel Distortion) early to warp coordinates
+    if (effects.useLensDistortion) {
+        uv = apply_lens_distortion(uv, effects.distortionAmount);
+    }
+
+    float u_coord = uv.x * 2.0f - 1.0f;
+    float v_coord = uv.y * 2.0f - 1.0f;
     float aspect = (float)width / height;
     u_coord *= aspect;
 
@@ -86,14 +94,9 @@ __global__ void raymarch_kernel(uchar4* output, int width, int height, float tim
                     float cloud_I = d_cloud * CLOUD_LUMINOSITY * lighting;
 
                     // --- REDSHIFT COLOR GRADING ---
-                    // g > 1.0: Blue-shift (approaching), g < 1.0: Red-shift (receding)
-                    // We map g to a color shift to make the disk less uniform
                     float shift = smoothstep(0.7f, 1.3f, g);
-                    
-                    // Base color is greyish blue
                     float3 base_color = make_float3(0.60f, 0.65f, 0.80f);
                     
-                    // Shift: Approaching (Blue/White) vs Receding (Deep Red/Grey)
                     step_emit.x += base_color.x * cloud_I * lerp(1.2f, 0.8f, shift);
                     step_emit.y += base_color.y * cloud_I * lerp(0.8f, 1.1f, shift);
                     step_emit.z += base_color.z * cloud_I * lerp(0.6f, 1.4f, shift);
@@ -118,36 +121,60 @@ __global__ void raymarch_kernel(uchar4* output, int width, int height, float tim
     }
 
     // --- FINAL COLOR ASSEMBLY ---
-    uchar4 final_color;
+    float3 final_hdr;
     
     // Background light (Skybox or Black Hole)
     float3 bg_color = make_float3(0,0,0);
     if (!hit_horizon) {
         float3 d = normalize(vel);
-        float phi = atan2f(d.z, d.x);
-        float theta = asinf(d.y);
-        float tx = 0.5f + phi / (2.0f * PI);
-        float ty = 0.5f - theta / PI;
-        float4 skyColor = tex2D<float4>(skyboxTex, tx, ty);
-        bg_color = make_float3(skyColor.x, skyColor.y, skyColor.z);
+        
+        // Chromatic Aberration: Shift UVs based on channel
+        float offset = effects.useChromaticAberration ? effects.caAmount : 0.0f;
+        
+        auto sample_sky = [&](float3 dir, float off) {
+            float phi = atan2f(dir.z, dir.x) + off;
+            float theta = asinf(dir.y);
+            float tx = 0.5f + phi / (2.0f * PI);
+            float ty = 0.5f - theta / PI;
+            return tex2D<float4>(skyboxTex, tx, ty);
+        };
+
+        float4 sR = sample_sky(d, offset);
+        float4 sG = sample_sky(d, 0.0f);
+        float4 sB = sample_sky(d, -offset);
+        bg_color = make_float3(sR.x, sG.y, sB.z);
     }
 
-    float out_r = intensity_r + bg_color.x * transmittance;
-    float out_g = intensity_g + bg_color.y * transmittance;
-    float out_b = intensity_b + bg_color.z * transmittance;
+    final_hdr.x = intensity_r + bg_color.x * transmittance;
+    final_hdr.y = intensity_g + bg_color.y * transmittance;
+    final_hdr.z = intensity_b + bg_color.z * transmittance;
+
+    
+    // --- CAMERA EFFECTS ---
+    if (effects.useBloom) {
+        float3 bloom = get_bloom_contribution(final_hdr, effects.bloomThreshold);
+        final_hdr = add(final_hdr, mul(bloom, effects.bloomIntensity));
+    }
+
+    if (effects.useVignette) {
+        final_hdr = apply_vignette(final_hdr, uv, effects.vignetteIntensity);
+    }
 
     // Tone mapping
-    out_r = 1.0f - expf(-out_r * EXPOSURE);
-    out_g = 1.0f - expf(-out_g * EXPOSURE);
-    out_b = 1.0f - expf(-out_b * EXPOSURE);
+    float out_r = 1.0f - expf(-final_hdr.x * EXPOSURE);
+    float out_g = 1.0f - expf(-final_hdr.y * EXPOSURE);
+    float out_b = 1.0f - expf(-final_hdr.z * EXPOSURE);
 
-    final_color = make_uchar4((unsigned char)(out_r * 255), (unsigned char)(out_g * 255), (unsigned char)(out_b * 255), 255);
-
-    output[(height - 1 - y) * width + x] = final_color;
+    output[(height - 1 - y) * width + x] = make_uchar4(
+        (unsigned char)(out_r * 255), 
+        (unsigned char)(out_g * 255), 
+        (unsigned char)(out_b * 255), 
+        255
+    );
 }
 
-void launch_raymarch(uchar4* d_out, int w, int h, float time, CameraState cam, cudaTextureObject_t skyboxTex) {
+void launch_raymarch(uchar4* d_out, int w, int h, float time, CameraState cam, cudaTextureObject_t skyboxTex, CameraEffects effects) {
     dim3 block(16, 16);
     dim3 grid((w + block.x - 1) / block.x, (h + block.y - 1) / block.y);
-    raymarch_kernel<<<grid, block>>>(d_out, w, h, time, cam, skyboxTex);
+    raymarch_kernel<<<grid, block>>>(d_out, w, h, time, cam, skyboxTex, effects);
 }

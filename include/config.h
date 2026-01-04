@@ -4,8 +4,8 @@
 #include <cuda_runtime.h>
 
 // --- WINDOW SETTINGS ---
-#define WINDOW_WIDTH 1920
-#define WINDOW_HEIGHT 1080
+#define WINDOW_WIDTH 1000
+#define WINDOW_HEIGHT 700
 #define RECORDING_FPS 24
 
 // --- PHYSICAL CONSTANTS (SI Units) ---
@@ -44,8 +44,8 @@
 #define CLOUD_LUMINOSITY 0.4f            // Highlights for the wisps
 
 // Integration Quality
-#define STEP_SIZE_M 0.05f                // [M] Integration step size in vacuum
-#define MAX_STEPS 13000                   // [Steps] Max ray steps
+#define STEP_SIZE_M 0.3f                // [M] Integration step size in vacuum
+#define MAX_STEPS 2000                   // [Steps] Max ray steps
 
 #endif
 
