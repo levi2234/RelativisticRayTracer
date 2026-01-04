@@ -58,15 +58,16 @@ void initDefaultPaths() {
     // --- PATH 3: HORIZON SKIMMER (Disk Exploration) ---
     CameraPath skimmer;
     skimmer.name = "Horizon Skimmer";
-    // Tight, low-altitude pass over the disk into the high-lensing inner region
-    // Now with mathematically calculated look-at angles to keep the BH centered
+    // Cinematic arc at R=6.0 (Safe from spline dips, well above Rs=2.0)
+    // This pass explores the inner disk and the "other side" lensing.
     skimmer.keyframes = {
-        {0.0f,  {0.0f, 3.0f, -40.0f},   0.0f,    -4.3f},  // Approach low over the "receding" side
-        {7.0f,  {25.0f, 1.0f, -15.0f},  -59.0f,  -2.0f},  // Skimming the outer disk filaments
-        {14.0f, {12.0f, 0.4f, 5.0f},    -112.4f, -1.7f},  // High-speed pass near the ISCO
-        {21.0f, {3.5f, 0.2f, 0.0f},     -90.0f,  -3.3f},  // Extreme lensing: skimming just above photon sphere
-        {28.0f, {-5.0f, 1.0f, -8.0f},   32.0f,   -6.0f},  // Slingshot around and looking back at BH
-        {35.0f, {-20.0f, 5.0f, -30.0f}, 33.7f,   -8.0f}   // Ascending out of the gravity well
+        {0.0f,  {0.0f, 10.0f, -60.0f},  0.0f,    -9.5f},  // High approach
+        {8.0f,  {15.0f, 2.0f, -15.0f},  -45.0f,  -4.7f},  // Entering disk zone
+        {14.0f, {4.2f, 0.6f, 4.2f},     -90.0f,  -5.7f},  // Point 1: 90 deg (R=6)
+
+        {20.0f, {-20.0f, 8.0f, -20.0f}, -225.0f, -20.0f},  // Pulling away
+        {26.0f, {-20.0f, 8.0f, -20.0f}, 20.0f, -10.0f},  // Rotating in place
+        {29.0f, {-30.0f, 2.0f, -30.0f},  45.0f,  -2.7f}   // Final centered view
     };
     PathManager::instance().registerPath(skimmer);
 }

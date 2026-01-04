@@ -4,8 +4,8 @@
 #include <cuda_runtime.h>
 
 // --- WINDOW SETTINGS ---
-#define WINDOW_WIDTH 1100
-#define WINDOW_HEIGHT 800
+#define WINDOW_WIDTH 1920
+#define WINDOW_HEIGHT 1080
 #define RECORDING_FPS 24
 
 // --- PHYSICAL CONSTANTS (SI Units) ---
@@ -18,7 +18,7 @@
 #define DISK_TEMP_REF 1.5e7f             // [K] Reference temperature of gas
 
 // --- NEW KERR PARAMETERS ---
-#define SPIN_A 0.7f                     // [0.0 to 1.0] Dimensionless spin parameter
+#define SPIN_A 0.0f                     // [0.0 to 1.0] Dimensionless spin parameter
 #define SPIN_AXIS make_float3(0, 1, 0)   // Rotation around Y-axis
 
 // --- SIMULATION SCALING (Geometric Units G=c=1) ---
@@ -44,8 +44,8 @@
 #define CLOUD_LUMINOSITY 0.4f            // Highlights for the wisps
 
 // Integration Quality
-#define STEP_SIZE_M 0.3f                // [M] Integration step size in vacuum
-#define MAX_STEPS 2000                   // [Steps] Max ray steps
+#define STEP_SIZE_M 0.05f                // [M] Integration step size in vacuum
+#define MAX_STEPS 13000                   // [Steps] Max ray steps
 
 #endif
 
