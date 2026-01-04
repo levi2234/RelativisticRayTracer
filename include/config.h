@@ -27,7 +27,7 @@
 
 // Simulation Units: 1.0 = M (The mass of the BH)
 #define EVENT_HORIZON 2.0f               // [M] Schwarzschild radius Rs = 2M
-#define MASS_POS make_float3(0.0f, 0.0f, 60.0f) // [M] Black hole position
+#define MASS_POS make_float3(0.0f, 0.0f, 0.0f) // [M] Black hole at origin
 
 // Physics & Aesthetic Tuning
 #define ISCO_RADIUS 10.0f                 // [M] Innermost stable orbit (6M for non-spinning)

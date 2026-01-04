@@ -7,12 +7,14 @@
 #include <iostream>
 #include <vector>
 #include <cmath>
+#include <algorithm>
 #include <cstdio>
 #include <chrono>
 #include <iomanip>
 #include <sstream>
 #include "raymarcher.h"
 #include "config.h"
+#include "camera_paths.h"
 
 #ifdef _WIN32
 #define popen _popen
@@ -119,9 +121,9 @@ struct ScreenRecorder {
 
 // --- CAMERA CONTROLLER ---
 struct CameraController {
-    float3 pos = {0.0f, 1.2f, 0.0f}; 
+    float3 pos = {0.0f, 10.0f, -60.0f}; 
     float yaw = 0.0f;               
-    float pitch = 0.0f;             
+    float pitch = -10.0f;             
     float lastX = WINDOW_WIDTH / 2.0f;
     float lastY = WINDOW_HEIGHT / 2.0f;
     bool firstMouse = true;
@@ -129,6 +131,10 @@ struct CameraController {
     float mouseSensitivity = 0.1f;
 
     CameraState getCUDAState() {
+        return getCUDAStateFrom(pos, yaw, pitch);
+    }
+
+    static CameraState getCUDAStateFrom(float3 pos, float yaw, float pitch) {
         float radYaw = yaw * 3.14159f / 180.0f;
         float radPitch = pitch * 3.14159f / 180.0f;
 
@@ -156,6 +162,58 @@ struct CameraController {
         return {pos, forward, right, up};
     }
 } g_Camera;
+
+// --- KEYFRAMING SYSTEM ---
+struct PathController {
+    int currentPathIndex = 0;
+    bool active = false;
+    float pathTime = 0.0f; // Fixed simulation clock
+
+    CameraState getInterpolatedState() {
+        const CameraPath* path = PathManager::instance().getPath(currentPathIndex);
+        if (!path || path->keyframes.empty()) return g_Camera.getCUDAState();
+
+        float t = pathTime;
+        const auto& keys = path->keyframes;
+
+        if (t <= keys.front().time) return CameraController::getCUDAStateFrom(keys.front().pos, keys.front().yaw, keys.front().pitch);
+        if (t >= keys.back().time) return CameraController::getCUDAStateFrom(keys.back().pos, keys.back().yaw, keys.back().pitch);
+
+        for (size_t i = 0; i < keys.size() - 1; ++i) {
+            if (t >= keys[i].time && t <= keys[i+1].time) {
+                float factor = (t - keys[i].time) / (keys[i+1].time - keys[i].time);
+                
+                int i0 = std::max(0, (int)i - 1);
+                int i1 = (int)i;
+                int i2 = (int)i + 1;
+                int i3 = std::min((int)keys.size() - 1, (int)i + 2);
+
+                float3 p = catmull_rom(keys[i0].pos, keys[i1].pos, keys[i2].pos, keys[i3].pos, factor);
+                float y = lerp_angle(keys[i1].yaw, keys[i2].yaw, factor);
+                float pi = lerp_angle(keys[i1].pitch, keys[i2].pitch, factor);
+                
+                return CameraController::getCUDAStateFrom(p, y, pi);
+            }
+        }
+        return g_Camera.getCUDAState();
+    }
+
+    void start() {
+        active = true;
+        pathTime = 0.0f;
+    }
+
+    void update(float dt) {
+        if (active) pathTime += dt;
+    }
+
+    void stop() { active = false; }
+    
+    void nextPath() {
+        if (PathManager::instance().getPaths().empty()) return;
+        currentPathIndex = (currentPathIndex + 1) % PathManager::instance().getPaths().size();
+    }
+} g_Path;
 
 // --- GLOBAL STATE ---
 struct AppState {
@@ -209,6 +267,14 @@ void key_callback(GLFWwindow* window, int key, int scancode, int action, int mod
     (void)scancode; (void)mods; // Unused parameters
     if (key == GLFW_KEY_R && action == GLFW_PRESS) {
         g_Recorder.toggle(WINDOW_WIDTH, WINDOW_HEIGHT);
+    }
+    if (key == GLFW_KEY_P && action == GLFW_PRESS) {
+        if (g_Path.active) g_Path.stop();
+        else g_Path.start();
+    }
+    if (key == GLFW_KEY_N && action == GLFW_PRESS) {
+        g_Path.nextPath();
+        std::cout << "Switched to path: " << PathManager::instance().getPath(g_Path.currentPathIndex)->name << std::endl;
     }
     if (key == GLFW_KEY_ESCAPE && action == GLFW_PRESS) {
         glfwSetWindowShouldClose(window, true);
@@ -354,28 +420,27 @@ void updateFPS(GLFWwindow* window) {
     if (delta >= 1.0) {
         double fps = double(nbFrames) / delta;
         char title[256];
-        if (g_Recorder.isRecording) {
-            sprintf(title, "Relativistic Ray Tracer | FPS: %.1f | [REC] %d frames", 
-                    fps, g_Recorder.frameCount);
-        } else {
-            sprintf(title, "Relativistic Ray Tracer | FPS: %.1f | Press R to record", fps);
-        }
+        const char* rec = g_Recorder.isRecording ? " [REC]" : "";
+        const char* path_active = g_Path.active ? " [PATH]" : "";
+        const CameraPath* path = PathManager::instance().getPath(g_Path.currentPathIndex);
+        const char* path_name = path ? path->name.c_str() : "None";
+
+        sprintf(title, "Relativistic Ray Tracer | FPS: %.1f | %s%s %s | R:Rec P:Path N:Next", 
+                fps, rec, path_active, path_name);
         glfwSetWindowTitle(window, title);
         nbFrames = 0;
         lastTime = currentTime;
     }
 }
 
-void renderFrame() {
-    static float time = 0.0f;
-    time += 0.016f;
-
+void renderFrame(float simTime) {
     uchar4* d_out;
     size_t size;
     cudaGraphicsMapResources(1, &g_State.cudaResource, 0);
     cudaGraphicsResourceGetMappedPointer((void**)&d_out, &size, g_State.cudaResource);
 
-    launch_raymarch(d_out, WINDOW_WIDTH, WINDOW_HEIGHT, time, g_Camera.getCUDAState(), g_State.skyboxTexObj);
+    CameraState camState = g_Path.active ? g_Path.getInterpolatedState() : g_Camera.getCUDAState();
+    launch_raymarch(d_out, WINDOW_WIDTH, WINDOW_HEIGHT, simTime, camState, g_State.skyboxTexObj);
 
     cudaGraphicsUnmapResources(1, &g_State.cudaResource, 0);
 
@@ -407,11 +472,28 @@ int main() {
     initGLResources();
     loadSkybox("assets/skyboxes/skybox2.jpg");
 
+    // Initialize cinematic paths
+    initDefaultPaths();
+
+    float simTime = 0.0f;
+    double lastFrameTime = glfwGetTime();
 
     while (!glfwWindowShouldClose(window)) {
+        double currentFrameTime = glfwGetTime();
+        float dt = (float)(currentFrameTime - lastFrameTime);
+        lastFrameTime = currentFrameTime;
+
+        // If recording, force a fixed time step to avoid path skips during lag
+        if (g_Recorder.isRecording) {
+            dt = 1.0f / RECORDING_FPS;
+        }
+
+        simTime += dt;
+        g_Path.update(dt);
+
         updateFPS(window);
         processInput(window);
-        renderFrame();
+        renderFrame(simTime);
         
         // Capture frame for recording (after render, before swap)
         if (g_Recorder.isRecording) {

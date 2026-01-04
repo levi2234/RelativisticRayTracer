@@ -36,6 +36,7 @@ add_executable(${PROJECT_NAME}
     ${SRC_DIR}/main.cpp 
     ${SRC_DIR}/glad.c 
     ${SRC_DIR}/raymarcher.cu
+    ${SRC_DIR}/camera_paths.cpp
 )
 
 # Set include path for headers
